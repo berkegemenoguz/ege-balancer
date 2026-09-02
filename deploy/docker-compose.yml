@@ -1,0 +1,64 @@
+# Mock backend environment for development and testing.
+# Each backend answers every request with its own identity, which makes the
+# distribution behaviour of the load balancing algorithms observable.
+
+services:
+  backend-1:
+    image: hashicorp/http-echo
+    command: ["-text=backend-1", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5681:5678"]
+
+  backend-2:
+    image: hashicorp/http-echo
+    command: ["-text=backend-2", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5682:5678"]
+
+  backend-3:
+    image: hashicorp/http-echo
+    command: ["-text=backend-3", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5683:5678"]
+
+  backend-4:
+    image: hashicorp/http-echo
+    command: ["-text=backend-4", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5684:5678"]
+
+  backend-5:
+    image: hashicorp/http-echo
+    command: ["-text=backend-5", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5685:5678"]
+
+  backend-6:
+    image: hashicorp/http-echo
+    command: ["-text=backend-6", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5686:5678"]
+
+  backend-7:
+    image: hashicorp/http-echo
+    command: ["-text=backend-7", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5687:5678"]
+
+  backend-8:
+    image: hashicorp/http-echo
+    command: ["-text=backend-8", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5688:5678"]
+
+  backend-9:
+    image: hashicorp/http-echo
+    command: ["-text=backend-9", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5689:5678"]
+
+  backend-10:
+    image: hashicorp/http-echo
+    command: ["-text=backend-10", "-listen=:5678"]
+    mem_limit: 32m
+    ports: ["5690:5678"]
