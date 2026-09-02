@@ -1,0 +1,20 @@
+# Binaries
+/bin/
+/lb
+*.exe
+
+# Test and profiling output
+*.test
+*.out
+*.prof
+coverage.*
+
+# Local configuration (configs/lb.example.yaml is tracked)
+/configs/lb.yaml
+/configs/*.local.yaml
+
+# Editor / OS / tooling
+.DS_Store
+.idea/
+.vscode/
+.claude/
