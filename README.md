@@ -6,8 +6,8 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 strategy, unhealthy backends are taken out of the pool automatically, and the whole
 system is observable through structured logs and Prometheus metrics.
 
-> Status: day 2 of the 12-day plan — configuration loading and validation.
-> Request forwarding is not implemented yet; running the binary validates the config and exits.
+> Status: day 3 of the 12-day plan — listener, graceful shutdown and a minimal reverse proxy.
+> Requests are forwarded to the first configured backend; balancing across backends comes next.
 
 ## Features (target for v1.0.0)
 
