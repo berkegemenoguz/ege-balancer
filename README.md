@@ -6,8 +6,8 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 strategy, unhealthy backends are taken out of the pool automatically, and the whole
 system is observable through structured logs and Prometheus metrics.
 
-> Status: day 3 of the 12-day plan — listener, graceful shutdown and a minimal reverse proxy.
-> Requests are forwarded to the first configured backend; balancing across backends comes next.
+> Status: day 4 of the 12-day plan — round robin balancing across the configured backends.
+> Least connections and weighted round robin are not implemented yet.
 
 ## Features (target for v1.0.0)
 
