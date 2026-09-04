@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/berkegemenoguz/ege-balancer/internal/balancer"
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
 	"github.com/berkegemenoguz/ege-balancer/internal/proxy"
 	"github.com/berkegemenoguz/ege-balancer/internal/server"
@@ -29,10 +30,13 @@ func run(configPath string) error {
 		return err
 	}
 
-	// Until the load balancing engine exists, every request goes to the first
-	// configured backend.
-	target := cfg.Backends[0]
-	srv, err := server.New(cfg, proxy.New(target, cfg.Timeouts))
+	strategy, err := balancer.New(cfg.Algorithm)
+	if err != nil {
+		return err
+	}
+	backends := balancer.BackendsFromConfig(cfg.Backends)
+
+	srv, err := server.New(cfg, proxy.New(strategy, backends, cfg.Timeouts))
 	if err != nil {
 		return err
 	}
@@ -40,6 +44,7 @@ func run(configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("listening on %s, forwarding to %s", srv.Addr(), target.Addr)
+	log.Printf("listening on %s, balancing %d backends with %s",
+		srv.Addr(), len(backends), strategy.Name())
 	return srv.Run(ctx)
 }
