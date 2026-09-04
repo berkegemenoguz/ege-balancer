@@ -4,6 +4,7 @@
 package proxy
 
 import (
+	"context"
 	"log"
 	"net"
 	"net/http"
@@ -11,30 +12,50 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/berkegemenoguz/ege-balancer/internal/balancer"
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
 )
 
-// New returns a handler that forwards every request to target.
-//
-// Backend selection is not part of this handler yet: until the load balancing
-// engine exists, all traffic goes to the single backend it is built with.
-func New(target config.Backend, timeouts config.Timeouts) http.Handler {
-	upstream := &url.URL{Scheme: "http", Host: target.Addr}
+// backendKey addresses the backend chosen for a request inside its context.
+type backendKey struct{}
 
-	return &httputil.ReverseProxy{
+// New returns a handler that asks strategy which backend serves each request
+// and forwards it there.
+func New(strategy balancer.LBStrategy, backends []*balancer.Backend, timeouts config.Timeouts) http.Handler {
+	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(upstream)
+			backend, _ := r.In.Context().Value(backendKey{}).(*balancer.Backend)
+			r.SetURL(&url.URL{Scheme: "http", Host: backend.Addr})
 			// Replaces any X-Forwarded-For sent by the client, so that a client
 			// cannot forge the address the backend sees.
 			r.SetXForwarded()
 		},
-		Transport: transport(timeouts),
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("proxy: %s %s to %s failed: %v", r.Method, r.URL.Path, upstream.Host, err)
-			w.Header().Set("Retry-After", "5")
-			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		},
+		Transport:    transport(timeouts),
+		ErrorHandler: handleBackendError,
 	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backend, err := strategy.Select(backends)
+		if err != nil {
+			log.Printf("proxy: %s %s rejected: %v", r.Method, r.URL.Path, err)
+			unavailable(w)
+			return
+		}
+		reverseProxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), backendKey{}, backend)))
+	})
+}
+
+// handleBackendError answers a request the chosen backend could not serve.
+func handleBackendError(w http.ResponseWriter, r *http.Request, err error) {
+	log.Printf("proxy: %s %s to %s failed: %v", r.Method, r.URL.Path, r.URL.Host, err)
+	unavailable(w)
+}
+
+// unavailable tells the client that no backend served the request and that
+// retrying shortly is worthwhile.
+func unavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "5")
+	http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 }
 
 // transport applies the configured connect timeout to every upstream dial.
