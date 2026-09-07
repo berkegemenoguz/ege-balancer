@@ -8,37 +8,29 @@ import (
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
 )
 
-func TestNewBuildsConfiguredStrategy(t *testing.T) {
-	strategy, err := New(config.RoundRobin)
-	if err != nil {
-		t.Fatalf("New returned an unexpected error: %v", err)
-	}
-	if got := strategy.Name(); got != string(config.RoundRobin) {
-		t.Errorf("Name() = %q, want %q", got, config.RoundRobin)
+func TestNewBuildsEveryConfiguredStrategy(t *testing.T) {
+	for _, algorithm := range []config.Algorithm{
+		config.RoundRobin, config.LeastConnections, config.WeightedRoundRobin,
+	} {
+		t.Run(string(algorithm), func(t *testing.T) {
+			strategy, err := New(algorithm)
+			if err != nil {
+				t.Fatalf("New returned an unexpected error: %v", err)
+			}
+			if got := strategy.Name(); got != string(algorithm) {
+				t.Errorf("Name() = %q, want %q", got, algorithm)
+			}
+		})
 	}
 }
 
-func TestNewRejectsUnavailableStrategies(t *testing.T) {
-	tests := []struct {
-		name      string
-		algorithm config.Algorithm
-		wantErr   string
-	}{
-		{"least connections", config.LeastConnections, "not implemented yet"},
-		{"weighted round robin", config.WeightedRoundRobin, "not implemented yet"},
-		{"unknown", config.Algorithm("random"), "unknown algorithm"},
+func TestNewRejectsUnknownAlgorithm(t *testing.T) {
+	strategy, err := New(config.Algorithm("random"))
+	if err == nil {
+		t.Fatalf("New returned %s, want an error", strategy.Name())
 	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			strategy, err := New(test.algorithm)
-			if err == nil {
-				t.Fatalf("New returned %v, want an error", strategy)
-			}
-			if got := err.Error(); !strings.Contains(got, test.wantErr) {
-				t.Errorf("error = %q, want it to mention %q", got, test.wantErr)
-			}
-		})
+	if !strings.Contains(err.Error(), "unknown algorithm") {
+		t.Errorf("error = %v, want it to mention the unknown algorithm", err)
 	}
 }
 
@@ -52,7 +44,8 @@ func TestBackendsFromConfig(t *testing.T) {
 		t.Fatalf("len = %d, want %d", got, want)
 	}
 	if backends[1].Addr != "backend-2:5678" || backends[1].Weight != 3 {
-		t.Errorf("backends[1] = %+v, want the second configured backend", *backends[1])
+		t.Errorf("backends[1] = %s weight %d, want backend-2:5678 weight 3",
+			backends[1].Addr, backends[1].Weight)
 	}
 }
 
@@ -62,6 +55,6 @@ func TestSelectOnEmptyPool(t *testing.T) {
 		t.Errorf("error = %v, want ErrNoBackends", err)
 	}
 	if backend != nil {
-		t.Errorf("backend = %+v, want nil", *backend)
+		t.Errorf("backend = %s, want nil", backend.Addr)
 	}
 }
