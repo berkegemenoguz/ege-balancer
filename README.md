@@ -6,8 +6,8 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 strategy, unhealthy backends are taken out of the pool automatically, and the whole
 system is observable through structured logs and Prometheus metrics.
 
-> Status: day 5 of the 12-day plan — all three balancing algorithms are selectable from
-> configuration. Health checking is not implemented yet, so a failed backend stays in the pool.
+> Status: day 6 of the 12-day plan — unhealthy backends leave the pool automatically and
+> rejoin once they recover. Retry, circuit breaking and rate limiting are not implemented yet.
 
 ## Features (target for v1.0.0)
 
