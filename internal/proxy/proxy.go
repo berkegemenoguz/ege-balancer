@@ -14,33 +14,49 @@ import (
 
 	"github.com/berkegemenoguz/ege-balancer/internal/balancer"
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
+	"github.com/berkegemenoguz/ege-balancer/internal/health"
 )
 
 // backendKey addresses the backend chosen for a request inside its context.
 type backendKey struct{}
 
-// New returns a handler that asks strategy which backend serves each request
-// and forwards it there.
-func New(strategy balancer.LBStrategy, backends []*balancer.Backend, timeouts config.Timeouts) http.Handler {
+// New returns a handler that forwards each request to a healthy backend chosen
+// by strategy, and reports the outcome back to checker so that a backend which
+// fails real traffic is taken out without waiting for the next probe.
+func New(
+	strategy balancer.LBStrategy,
+	backends []*balancer.Backend,
+	checker health.Checker,
+	timeouts config.Timeouts,
+) http.Handler {
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
-			backend, _ := r.In.Context().Value(backendKey{}).(*balancer.Backend)
+			backend := backendFrom(r.In.Context())
 			r.SetURL(&url.URL{Scheme: "http", Host: backend.Addr})
 			// Replaces any X-Forwarded-For sent by the client, so that a client
 			// cannot forge the address the backend sees.
 			r.SetXForwarded()
 		},
-		Transport:    transport(timeouts),
-		ErrorHandler: handleBackendError,
+		Transport: transport(timeouts),
+		ModifyResponse: func(response *http.Response) error {
+			checker.ReportSuccess(backendFrom(response.Request.Context()).Addr)
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			checker.ReportFailure(backendFrom(r.Context()).Addr)
+			log.Printf("proxy: %s %s to %s failed: %v", r.Method, r.URL.Path, r.URL.Host, err)
+			unavailable(w)
+		},
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		backend, err := strategy.Select(backends)
+		backend, err := strategy.Select(healthy(backends, checker))
 		if err != nil {
 			log.Printf("proxy: %s %s rejected: %v", r.Method, r.URL.Path, err)
 			unavailable(w)
 			return
 		}
+
 		// The counter is what least connections balances on, so it must cover
 		// the whole request, not just the choice.
 		backend.Acquire()
@@ -50,10 +66,21 @@ func New(strategy balancer.LBStrategy, backends []*balancer.Backend, timeouts co
 	})
 }
 
-// handleBackendError answers a request the chosen backend could not serve.
-func handleBackendError(w http.ResponseWriter, r *http.Request, err error) {
-	log.Printf("proxy: %s %s to %s failed: %v", r.Method, r.URL.Path, r.URL.Host, err)
-	unavailable(w)
+// healthy returns the backends that are currently fit to serve traffic.
+func healthy(backends []*balancer.Backend, checker health.Checker) []*balancer.Backend {
+	fit := make([]*balancer.Backend, 0, len(backends))
+	for _, backend := range backends {
+		if checker.IsHealthy(backend.Addr) {
+			fit = append(fit, backend)
+		}
+	}
+	return fit
+}
+
+// backendFrom returns the backend the request was routed to.
+func backendFrom(ctx context.Context) *balancer.Backend {
+	backend, _ := ctx.Value(backendKey{}).(*balancer.Backend)
+	return backend
 }
 
 // unavailable tells the client that no backend served the request and that
