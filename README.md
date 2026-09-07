@@ -6,8 +6,8 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 strategy, unhealthy backends are taken out of the pool automatically, and the whole
 system is observable through structured logs and Prometheus metrics.
 
-> Status: day 4 of the 12-day plan — round robin balancing across the configured backends.
-> Least connections and weighted round robin are not implemented yet.
+> Status: day 5 of the 12-day plan — all three balancing algorithms are selectable from
+> configuration. Health checking is not implemented yet, so a failed backend stays in the pool.
 
 ## Features (target for v1.0.0)
 
