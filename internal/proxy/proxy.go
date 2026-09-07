@@ -41,6 +41,11 @@ func New(strategy balancer.LBStrategy, backends []*balancer.Backend, timeouts co
 			unavailable(w)
 			return
 		}
+		// The counter is what least connections balances on, so it must cover
+		// the whole request, not just the choice.
+		backend.Acquire()
+		defer backend.Release()
+
 		reverseProxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), backendKey{}, backend)))
 	})
 }
