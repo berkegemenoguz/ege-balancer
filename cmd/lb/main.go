@@ -11,6 +11,7 @@ import (
 
 	"github.com/berkegemenoguz/ege-balancer/internal/balancer"
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
+	"github.com/berkegemenoguz/ege-balancer/internal/health"
 	"github.com/berkegemenoguz/ege-balancer/internal/proxy"
 	"github.com/berkegemenoguz/ege-balancer/internal/server"
 )
@@ -35,14 +36,17 @@ func run(configPath string) error {
 		return err
 	}
 	backends := balancer.BackendsFromConfig(cfg.Backends)
+	checker := health.New(cfg.HealthCheck)
 
-	srv, err := server.New(cfg, proxy.New(strategy, backends, cfg.Timeouts))
+	srv, err := server.New(cfg, proxy.New(strategy, backends, checker, cfg.Timeouts))
 	if err != nil {
 		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	checker.Start(ctx, backends)
 
 	log.Printf("listening on %s, balancing %d backends with %s",
 		srv.Addr(), len(backends), strategy.Name())
