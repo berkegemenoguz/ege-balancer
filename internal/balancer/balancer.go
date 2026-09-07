@@ -6,6 +6,7 @@ package balancer
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
 )
@@ -14,10 +15,30 @@ import (
 // empty set of backends. The caller answers such a request with 503.
 var ErrNoBackends = errors.New("no backend available")
 
-// Backend is one upstream server the load balancer can forward to.
+// Backend is one upstream server the load balancer can forward to. A Backend is
+// shared by every connection goroutine, so it is always held by pointer and its
+// mutable state is accessed atomically.
 type Backend struct {
 	Addr   string
 	Weight int
+
+	// active counts the requests currently being served by this backend.
+	active atomic.Int64
+}
+
+// Acquire records that a request has been handed to the backend.
+func (b *Backend) Acquire() {
+	b.active.Add(1)
+}
+
+// Release records that a request the backend was serving has finished.
+func (b *Backend) Release() {
+	b.active.Add(-1)
+}
+
+// ActiveConnections is the number of requests the backend is serving now.
+func (b *Backend) ActiveConnections() int64 {
+	return b.active.Load()
 }
 
 // LBStrategy picks the backend that serves the next request. Implementations
@@ -35,8 +56,10 @@ func New(algorithm config.Algorithm) (LBStrategy, error) {
 	switch algorithm {
 	case config.RoundRobin:
 		return NewRoundRobin(), nil
-	case config.LeastConnections, config.WeightedRoundRobin:
-		return nil, fmt.Errorf("algorithm %s is not implemented yet", algorithm)
+	case config.LeastConnections:
+		return NewLeastConnections(), nil
+	case config.WeightedRoundRobin:
+		return NewWeightedRoundRobin(), nil
 	default:
 		return nil, fmt.Errorf("unknown algorithm %s", algorithm)
 	}
