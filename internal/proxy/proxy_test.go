@@ -1,16 +1,66 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/berkegemenoguz/ege-balancer/internal/balancer"
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
+	"github.com/berkegemenoguz/ege-balancer/internal/health"
 )
+
+// allHealthy is a checker that knows no backend, so every address it is asked
+// about may serve. Tests that care about health use fakeChecker instead.
+var allHealthy = health.New(config.HealthCheck{})
+
+// fakeChecker reports exactly the health the test asks for and records what the
+// proxy reported back.
+type fakeChecker struct {
+	mu        sync.Mutex
+	unhealthy map[string]bool
+	successes []string
+	failures  []string
+}
+
+func newFakeChecker(unhealthy ...string) *fakeChecker {
+	down := make(map[string]bool, len(unhealthy))
+	for _, addr := range unhealthy {
+		down[addr] = true
+	}
+	return &fakeChecker{unhealthy: down}
+}
+
+func (f *fakeChecker) Start(context.Context, []*balancer.Backend) {}
+
+func (f *fakeChecker) IsHealthy(addr string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.unhealthy[addr]
+}
+
+func (f *fakeChecker) ReportSuccess(addr string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.successes = append(f.successes, addr)
+}
+
+func (f *fakeChecker) ReportFailure(addr string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failures = append(f.failures, addr)
+}
+
+func (f *fakeChecker) reported() (successes, failures []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.successes...), append([]string(nil), f.failures...)
+}
 
 // testTimeouts are short enough to keep a failing dial from slowing the suite.
 var testTimeouts = config.Timeouts{ConnectTimeout: config.Duration(time.Second)}
@@ -104,7 +154,7 @@ func serveThroughProxy(t *testing.T, backend *httptest.Server, request *http.Req
 
 // newSingleBackend builds a proxy over a pool holding only addr.
 func newSingleBackend(addr string) http.Handler {
-	return New(balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, testTimeouts)
+	return New(balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, allHealthy, testTimeouts)
 }
 
 func TestDistributesAcrossBackends(t *testing.T) {
@@ -120,7 +170,7 @@ func TestDistributesAcrossBackends(t *testing.T) {
 		backends = append(backends, &balancer.Backend{Addr: strings.TrimPrefix(server.URL, "http://")})
 	}
 
-	handler := New(balancer.NewRoundRobin(), backends, testTimeouts)
+	handler := New(balancer.NewRoundRobin(), backends, allHealthy, testTimeouts)
 	for range requests {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -137,7 +187,7 @@ func TestDistributesAcrossBackends(t *testing.T) {
 }
 
 func TestEmptyPoolReturnsServiceUnavailable(t *testing.T) {
-	handler := New(balancer.NewRoundRobin(), nil, testTimeouts)
+	handler := New(balancer.NewRoundRobin(), nil, allHealthy, testTimeouts)
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -147,5 +197,86 @@ func TestEmptyPoolReturnsServiceUnavailable(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Retry-After"); got != "5" {
 		t.Errorf("Retry-After = %q, want %q", got, "5")
+	}
+}
+
+func TestUnhealthyBackendIsSkipped(t *testing.T) {
+	const requests = 6
+
+	served := make([]int, 2)
+	backends := make([]*balancer.Backend, 0, len(served))
+	for i := range served {
+		server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+			served[i]++
+		}))
+		defer server.Close()
+		backends = append(backends, &balancer.Backend{Addr: strings.TrimPrefix(server.URL, "http://")})
+	}
+
+	checker := newFakeChecker(backends[0].Addr)
+	handler := New(balancer.NewRoundRobin(), backends, checker, testTimeouts)
+
+	for range requests {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+		}
+	}
+
+	if served[0] != 0 {
+		t.Errorf("the unhealthy backend served %d requests, want none", served[0])
+	}
+	if served[1] != requests {
+		t.Errorf("the healthy backend served %d requests, want all %d", served[1], requests)
+	}
+}
+
+func TestAllBackendsUnhealthyReturnsServiceUnavailable(t *testing.T) {
+	backend := &balancer.Backend{Addr: "backend-1:5678"}
+	handler := New(balancer.NewRoundRobin(), []*balancer.Backend{backend},
+		newFakeChecker(backend.Addr), testTimeouts)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestServedRequestIsReportedAsSuccess(t *testing.T) {
+	backend := httptest.NewServer(http.NotFoundHandler())
+	defer backend.Close()
+
+	addr := strings.TrimPrefix(backend.URL, "http://")
+	checker := newFakeChecker()
+	handler := New(balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker, testTimeouts)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	successes, failures := checker.reported()
+	if len(successes) != 1 || successes[0] != addr {
+		t.Errorf("successes = %v, want one report for %s", successes, addr)
+	}
+	if len(failures) != 0 {
+		t.Errorf("failures = %v, want none", failures)
+	}
+}
+
+func TestUnreachableBackendIsReportedAsFailure(t *testing.T) {
+	const addr = "127.0.0.1:1"
+
+	checker := newFakeChecker()
+	handler := New(balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker, testTimeouts)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	successes, failures := checker.reported()
+	if len(failures) != 1 || failures[0] != addr {
+		t.Errorf("failures = %v, want one report for %s", failures, addr)
+	}
+	if len(successes) != 0 {
+		t.Errorf("successes = %v, want none", successes)
 	}
 }
