@@ -38,7 +38,7 @@ func run(configPath string) error {
 	backends := balancer.BackendsFromConfig(cfg.Backends)
 	checker := health.New(cfg.HealthCheck)
 
-	srv, err := server.New(cfg, proxy.New(strategy, backends, checker, cfg.Timeouts))
+	srv, err := server.New(cfg, proxy.New(cfg, strategy, backends, checker))
 	if err != nil {
 		return err
 	}
