@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ func testConfig() *config.Config {
 			WriteTimeout: config.Duration(5 * time.Second),
 			IdleTimeout:  config.Duration(5 * time.Second),
 		},
+		Limits: config.Limits{MaxConnections: 100},
 	}
 }
 
@@ -152,4 +154,74 @@ func TestNewRejectsMalformedAddress(t *testing.T) {
 	} else if want := fmt.Sprintf("listen on %s", cfg.ListenAddr); !strings.Contains(err.Error(), want) {
 		t.Errorf("error = %v, want it to mention %q", err, want)
 	}
+}
+
+func TestConnectionLimitBoundsConcurrentConnections(t *testing.T) {
+	const limit = 2
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	cfg := testConfig()
+	cfg.Limits.MaxConnections = limit
+
+	var (
+		mu      sync.Mutex
+		open    int
+		highest int
+	)
+	release := make(chan struct{})
+	srv, err := New(cfg, http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		open++
+		if open > highest {
+			highest = open
+		}
+		mu.Unlock()
+
+		<-release
+
+		mu.Lock()
+		open--
+		mu.Unlock()
+	}))
+	if err != nil {
+		t.Fatalf("New returned an unexpected error: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+
+	url := "http://" + srv.Addr()
+	var wg sync.WaitGroup
+	for range limit + 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Each request needs its own connection, so keep-alive reuse cannot
+			// hide the limit.
+			client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+			response, err := client.Get(url)
+			if err == nil {
+				_ = response.Body.Close()
+			}
+		}()
+	}
+
+	// Give the requests time to pile up against the limit before releasing them.
+	time.Sleep(200 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if highest > limit {
+		t.Errorf("%d connections were served at once, want at most %d", highest, limit)
+	}
+	if highest == 0 {
+		t.Error("no request was served")
+	}
+
+	cancel()
+	<-done
 }
