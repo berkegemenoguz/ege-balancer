@@ -1,0 +1,17 @@
+apiVersion: 1
+
+# Drops the previous registration first, so that changing the datasource here
+# does not leave Grafana refusing to start against its existing database.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
+datasources:
+  - name: Prometheus
+    # Fixed so the provisioned dashboard can reference it, instead of relying
+    # on the identifier Grafana would generate.
+    uid: ege-balancer-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true

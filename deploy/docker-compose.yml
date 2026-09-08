@@ -62,3 +62,24 @@ services:
     command: ["-text=backend-10", "-listen=:5678"]
     mem_limit: 32m
     ports: ["5690:5678"]
+
+  prometheus:
+    image: prom/prometheus
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml"]
+    ports: ["9090:9090"]
+    mem_limit: 256m
+    # Lets Prometheus reach the load balancer running on the host.
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  grafana:
+    image: grafana/grafana
+    volumes: ["./grafana:/etc/grafana/provisioning"]
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+    # Grafana 13 idles inside 256 MB but is killed while rendering the
+    # dashboard, so it gets twice what the design document suggested.
+    mem_limit: 512m
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"

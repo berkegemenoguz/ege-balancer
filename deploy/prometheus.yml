@@ -1,0 +1,9 @@
+# Prometheus scrapes the load balancer, which runs on the host during
+# development while the mock backends run in containers.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: ege-balancer
+    static_configs:
+      - targets: ["host.docker.internal:8081"]
