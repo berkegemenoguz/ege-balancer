@@ -6,8 +6,9 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 strategy, unhealthy backends are taken out of the pool automatically, and the whole
 system is observable through structured logs and Prometheus metrics.
 
-> Status: day 6 of the 12-day plan — unhealthy backends leave the pool automatically and
-> rejoin once they recover. Retry, circuit breaking and rate limiting are not implemented yet.
+> Status: day 7 of the 12-day plan — the proxy core is complete: configurable failure
+> policies, per-IP rate limiting, request validation and resource limits. Structured logging
+> and metrics come next.
 
 ## Features (target for v1.0.0)
 
@@ -74,6 +75,9 @@ for local changes — that path is gitignored.
 
 The full technical design, including the architecture rationale, the 12-day plan and
 the production readiness criteria, is in [docs/technical-design-v1.6.pdf](docs/technical-design-v1.6.pdf).
+
+The [development log](docs/development-log/) keeps one page per day of that plan: what was
+built, which decisions were taken and why, what went wrong, and how the result was verified.
 
 ## License
 
