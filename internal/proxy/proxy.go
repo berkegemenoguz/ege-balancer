@@ -4,7 +4,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -20,61 +23,179 @@ import (
 // backendKey addresses the backend chosen for a request inside its context.
 type backendKey struct{}
 
-// New returns a handler that forwards each request to a healthy backend chosen
-// by strategy, and reports the outcome back to checker so that a backend which
-// fails real traffic is taken out without waiting for the next probe.
+// errRetryable5xx turns a 5xx answer into a failed attempt, so that the retry
+// loop moves on to the next backend. It never reaches the client.
+var errRetryable5xx = errors.New("backend answered 5xx")
+
+// Core forwards requests to the backends, applying the configured failure
+// policy on the way.
+type Core struct {
+	strategy balancer.LBStrategy
+	backends []*balancer.Backend
+	checker  health.Checker
+	breaker  *breaker
+
+	forward *httputil.ReverseProxy
+	// attempts is how many backends a single request may be offered to.
+	attempts   int
+	retryOn5xx bool
+	maxBody    int64
+}
+
+// New returns the handler that serves proxied traffic, with rate limiting and
+// request validation applied in front of it.
 func New(
+	cfg *config.Config,
 	strategy balancer.LBStrategy,
 	backends []*balancer.Backend,
 	checker health.Checker,
-	timeouts config.Timeouts,
 ) http.Handler {
-	reverseProxy := &httputil.ReverseProxy{
+	core := &Core{
+		strategy:   strategy,
+		backends:   backends,
+		checker:    checker,
+		breaker:    newBreaker(cfg.FailurePolicy, cfg.CircuitBreaker),
+		attempts:   attemptsFor(cfg),
+		retryOn5xx: cfg.RetryOn5xx,
+		maxBody:    cfg.Limits.MaxRequestBodyBytes,
+	}
+	core.forward = core.newReverseProxy(cfg.Timeouts)
+
+	return newRateLimiter(cfg.Limits.RateLimitPerIP).wrap(validateRequest(core))
+}
+
+// attemptsFor translates the failure policy into the number of backends a
+// request may be offered to.
+func attemptsFor(cfg *config.Config) int {
+	if cfg.FailurePolicy == config.RetryNextBackend {
+		// The first try plus the configured retries.
+		return 1 + cfg.Retry.MaxRetries
+	}
+	// fail_fast answers on the first failure; circuit_breaker does the same and
+	// instead keeps the failing backend out of later selections.
+	return 1
+}
+
+// newReverseProxy builds the forwarder shared by every attempt. The backend to
+// use is carried on the request context, so one instance serves all of them.
+func (c *Core) newReverseProxy(timeouts config.Timeouts) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
-			backend := backendFrom(r.In.Context())
-			r.SetURL(&url.URL{Scheme: "http", Host: backend.Addr})
+			r.SetURL(&url.URL{Scheme: "http", Host: backendFrom(r.In.Context()).Addr})
 			// Replaces any X-Forwarded-For sent by the client, so that a client
 			// cannot forge the address the backend sees.
 			r.SetXForwarded()
 		},
 		Transport: transport(timeouts),
 		ModifyResponse: func(response *http.Response) error {
-			checker.ReportSuccess(backendFrom(response.Request.Context()).Addr)
+			if c.retryOn5xx && response.StatusCode >= http.StatusInternalServerError {
+				return errRetryable5xx
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			checker.ReportFailure(backendFrom(r.Context()).Addr)
-			log.Printf("proxy: %s %s to %s failed: %v", r.Method, r.URL.Path, r.URL.Host, err)
-			unavailable(w)
+			// Nothing is written here: the attempt reports the failure and the
+			// retry loop decides whether the client sees an error at all.
+			if current, ok := w.(*attempt); ok {
+				current.err = err
+			}
 		},
 	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		backend, err := strategy.Select(healthy(backends, checker))
-		if err != nil {
-			log.Printf("proxy: %s %s rejected: %v", r.Method, r.URL.Path, err)
-			unavailable(w)
-			return
-		}
-
-		// The counter is what least connections balances on, so it must cover
-		// the whole request, not just the choice.
-		backend.Acquire()
-		defer backend.Release()
-
-		reverseProxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), backendKey{}, backend)))
-	})
 }
 
-// healthy returns the backends that are currently fit to serve traffic.
-func healthy(backends []*balancer.Backend, checker health.Checker) []*balancer.Backend {
-	fit := make([]*balancer.Backend, 0, len(backends))
-	for _, backend := range backends {
-		if checker.IsHealthy(backend.Addr) {
+// ServeHTTP offers the request to healthy backends until one serves it or the
+// configured number of attempts runs out.
+func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, err := c.replayableBody(r)
+	if err != nil {
+		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	tried := make(map[string]bool, c.attempts)
+	for range c.attempts {
+		backend, err := c.strategy.Select(c.available(tried))
+		if err != nil {
+			break
+		}
+		tried[backend.Addr] = true
+
+		if c.serve(w, r, backend, body) {
+			return
+		}
+	}
+
+	log.Printf("proxy: %s %s could not be served by any backend", r.Method, r.URL.Path)
+	unavailable(w)
+}
+
+// serve makes one attempt and reports whether the client was answered.
+func (c *Core) serve(w http.ResponseWriter, r *http.Request, backend *balancer.Backend, body []byte) bool {
+	// The counter is what least connections balances on, so it must cover the
+	// whole request, not just the choice.
+	backend.Acquire()
+	defer backend.Release()
+
+	if body != nil {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
+
+	current := &attempt{ResponseWriter: w}
+	c.forward.ServeHTTP(current, r.WithContext(context.WithValue(r.Context(), backendKey{}, backend)))
+
+	if current.err == nil {
+		c.checker.ReportSuccess(backend.Addr)
+		c.breaker.recordSuccess(backend.Addr)
+		return true
+	}
+
+	c.checker.ReportFailure(backend.Addr)
+	c.breaker.recordFailure(backend.Addr)
+	log.Printf("proxy: %s %s to %s failed: %v", r.Method, r.URL.Path, backend.Addr, current.err)
+	return false
+}
+
+// available returns the backends that may serve the request now: healthy, not
+// tripped by the circuit breaker, and not already tried for this request.
+func (c *Core) available(tried map[string]bool) []*balancer.Backend {
+	fit := make([]*balancer.Backend, 0, len(c.backends))
+	for _, backend := range c.backends {
+		if !tried[backend.Addr] && c.checker.IsHealthy(backend.Addr) && c.breaker.allow(backend.Addr) {
 			fit = append(fit, backend)
 		}
 	}
 	return fit
+}
+
+// replayableBody buffers the request body when a retry may need to send it
+// again. It returns nil when there is no body to replay.
+func (c *Core) replayableBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil, nil
+	}
+	if r.ContentLength > c.maxBody {
+		return nil, errors.New("request body exceeds the configured limit")
+	}
+	if c.attempts == 1 {
+		// Without retries the body is streamed straight through.
+		return nil, nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, c.maxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > c.maxBody {
+		return nil, errors.New("request body exceeds the configured limit")
+	}
+	return body, nil
+}
+
+// attempt lets the error handler mark a try as failed without writing anything
+// to the client, which keeps the response free for the next backend.
+type attempt struct {
+	http.ResponseWriter
+	err error
 }
 
 // backendFrom returns the backend the request was routed to.
