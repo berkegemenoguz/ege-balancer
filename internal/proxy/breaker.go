@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -69,7 +69,7 @@ func (b *breaker) allow(addr string) bool {
 	}
 
 	tracked.probing = true
-	log.Printf("breaker: probing %s after the open period", addr)
+	slog.Info("probing backend after the open period", "backend", addr)
 	return true
 }
 
@@ -87,7 +87,7 @@ func (b *breaker) recordSuccess(addr string) {
 		return
 	}
 	if !tracked.openedUntil.IsZero() {
-		log.Printf("breaker: %s recovered and is back in the pool", addr)
+		slog.Info("backend recovered, circuit closed", "backend", addr)
 	}
 	delete(b.circuits, addr)
 }
@@ -112,7 +112,7 @@ func (b *breaker) recordFailure(addr string) {
 	tracked.failures++
 	if tracked.failures >= b.failureThreshold {
 		tracked.openedUntil = time.Now().Add(b.openDuration)
-		log.Printf("breaker: %s shut out for %s after %d consecutive failures",
-			addr, b.openDuration, tracked.failures)
+		slog.Warn("circuit opened", "backend", addr,
+			"duration", b.openDuration, "failures", tracked.failures)
 	}
 }

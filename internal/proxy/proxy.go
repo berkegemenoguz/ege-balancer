@@ -8,16 +8,18 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/berkegemenoguz/ege-balancer/internal/balancer"
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
 	"github.com/berkegemenoguz/ege-balancer/internal/health"
+	"github.com/berkegemenoguz/ege-balancer/internal/observability"
 )
 
 // backendKey addresses the backend chosen for a request inside its context.
@@ -34,6 +36,7 @@ type Core struct {
 	backends []*balancer.Backend
 	checker  health.Checker
 	breaker  *breaker
+	metrics  *observability.Metrics
 
 	forward *httputil.ReverseProxy
 	// attempts is how many backends a single request may be offered to.
@@ -49,19 +52,21 @@ func New(
 	strategy balancer.LBStrategy,
 	backends []*balancer.Backend,
 	checker health.Checker,
+	metrics *observability.Metrics,
 ) http.Handler {
 	core := &Core{
 		strategy:   strategy,
 		backends:   backends,
 		checker:    checker,
 		breaker:    newBreaker(cfg.FailurePolicy, cfg.CircuitBreaker),
+		metrics:    metrics,
 		attempts:   attemptsFor(cfg),
 		retryOn5xx: cfg.RetryOn5xx,
 		maxBody:    cfg.Limits.MaxRequestBodyBytes,
 	}
 	core.forward = core.newReverseProxy(cfg.Timeouts)
 
-	return newRateLimiter(cfg.Limits.RateLimitPerIP).wrap(validateRequest(core))
+	return newRateLimiter(cfg.Limits.RateLimitPerIP, metrics).wrap(validateRequest(metrics, core))
 }
 
 // attemptsFor translates the failure policy into the number of backends a
@@ -108,6 +113,7 @@ func (c *Core) newReverseProxy(timeouts config.Timeouts) *httputil.ReverseProxy 
 func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := c.replayableBody(r)
 	if err != nil {
+		c.metrics.ObserveRejection("body_too_large")
 		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -125,7 +131,8 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("proxy: %s %s could not be served by any backend", r.Method, r.URL.Path)
+	slog.Warn("no backend could serve the request", "method", r.Method, "path", r.URL.Path)
+	c.metrics.ObserveRejection("no_backend_available")
 	unavailable(w)
 }
 
@@ -140,18 +147,25 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, backend *balancer.B
 		r.Body = io.NopCloser(bytes.NewReader(body))
 	}
 
-	current := &attempt{ResponseWriter: w}
+	current := &attempt{ResponseWriter: w, status: http.StatusOK}
+	started := time.Now()
 	c.forward.ServeHTTP(current, r.WithContext(context.WithValue(r.Context(), backendKey{}, backend)))
+	took := time.Since(started)
 
 	if current.err == nil {
 		c.checker.ReportSuccess(backend.Addr)
 		c.breaker.recordSuccess(backend.Addr)
+		c.metrics.ObserveRequest(backend.Addr, strconv.Itoa(current.status), took)
+		slog.Debug("request served", "method", r.Method, "path", r.URL.Path,
+			"backend", backend.Addr, "status", current.status, "duration", took)
 		return true
 	}
 
 	c.checker.ReportFailure(backend.Addr)
 	c.breaker.recordFailure(backend.Addr)
-	log.Printf("proxy: %s %s to %s failed: %v", r.Method, r.URL.Path, backend.Addr, current.err)
+	c.metrics.ObserveBackendFailure(backend.Addr)
+	slog.Warn("backend attempt failed", "method", r.Method, "path", r.URL.Path,
+		"backend", backend.Addr, "error", current.err)
 	return false
 }
 
@@ -192,10 +206,24 @@ func (c *Core) replayableBody(r *http.Request) ([]byte, error) {
 }
 
 // attempt lets the error handler mark a try as failed without writing anything
-// to the client, which keeps the response free for the next backend.
+// to the client, which keeps the response free for the next backend. It also
+// records the status the backend answered with, for the metrics.
 type attempt struct {
 	http.ResponseWriter
-	err error
+	err    error
+	status int
+}
+
+// WriteHeader records the status on its way to the client.
+func (a *attempt) WriteHeader(status int) {
+	a.status = status
+	a.ResponseWriter.WriteHeader(status)
+}
+
+// Unwrap exposes the underlying writer, so that http.ResponseController can
+// still reach the flushing and deadline support of the real connection.
+func (a *attempt) Unwrap() http.ResponseWriter {
+	return a.ResponseWriter
 }
 
 // backendFrom returns the backend the request was routed to.

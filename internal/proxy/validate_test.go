@@ -26,7 +26,7 @@ func TestAmbiguouslyFramedRequestsAreRejected(t *testing.T) {
 				request.Header[name] = values
 			}
 
-			response := send(validateRequest(countingHandler(&served)), request)
+			response := send(validateRequest(testMetrics(), countingHandler(&served)), request)
 			if response.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want %d", response.Code, http.StatusBadRequest)
 			}
@@ -42,7 +42,7 @@ func TestWellFramedRequestIsForwarded(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("payload"))
 	request.Header.Set("Content-Length", "7")
 
-	if response := send(validateRequest(countingHandler(&served)), request); response.Code != http.StatusOK {
+	if response := send(validateRequest(testMetrics(), countingHandler(&served)), request); response.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", response.Code, http.StatusOK)
 	}
 	if served != 1 {

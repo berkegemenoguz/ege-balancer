@@ -23,7 +23,7 @@ func TestRateLimitRejectsAboveTheConfiguredRate(t *testing.T) {
 	const limit = 3
 
 	var served int
-	handler := newRateLimiter(limit).wrap(countingHandler(&served))
+	handler := newRateLimiter(limit, testMetrics()).wrap(countingHandler(&served))
 
 	for i := range limit {
 		if response := send(handler, requestFrom("203.0.113.7")); response.Code != http.StatusOK {
@@ -46,7 +46,7 @@ func TestRateLimitRejectsAboveTheConfiguredRate(t *testing.T) {
 
 func TestRateLimitIsPerClient(t *testing.T) {
 	var served int
-	handler := newRateLimiter(1).wrap(countingHandler(&served))
+	handler := newRateLimiter(1, testMetrics()).wrap(countingHandler(&served))
 
 	for _, client := range []string{"203.0.113.7", "198.51.100.4", "192.0.2.9"} {
 		if response := send(handler, requestFrom(client)); response.Code != http.StatusOK {
@@ -70,7 +70,7 @@ func spend(t *testing.T, limiter *rateLimiter, at time.Time, n int) {
 }
 
 func TestRateLimitRefillsOverTime(t *testing.T) {
-	limiter := newRateLimiter(2)
+	limiter := newRateLimiter(2, testMetrics())
 	start := time.Now()
 
 	spend(t, limiter, start, 2)
@@ -85,7 +85,7 @@ func TestRateLimitRefillsOverTime(t *testing.T) {
 }
 
 func TestRateLimitDoesNotAccumulateBeyondTheBurst(t *testing.T) {
-	limiter := newRateLimiter(2)
+	limiter := newRateLimiter(2, testMetrics())
 	start := time.Now()
 
 	// A minute of silence must not buy more than one full burst.
@@ -99,7 +99,7 @@ func TestRateLimitDoesNotAccumulateBeyondTheBurst(t *testing.T) {
 
 func TestRateLimitDisabledWhenZero(t *testing.T) {
 	var served int
-	handler := newRateLimiter(0).wrap(countingHandler(&served))
+	handler := newRateLimiter(0, testMetrics()).wrap(countingHandler(&served))
 
 	for range 50 {
 		if response := send(handler, requestFrom("203.0.113.7")); response.Code != http.StatusOK {
@@ -112,7 +112,7 @@ func TestRateLimitDisabledWhenZero(t *testing.T) {
 }
 
 func TestSweepDropsIdleClients(t *testing.T) {
-	limiter := newRateLimiter(1)
+	limiter := newRateLimiter(1, testMetrics())
 	start := time.Now()
 
 	limiter.allow("203.0.113.7", start)

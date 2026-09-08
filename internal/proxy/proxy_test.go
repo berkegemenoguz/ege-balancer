@@ -13,7 +13,13 @@ import (
 	"github.com/berkegemenoguz/ege-balancer/internal/balancer"
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
 	"github.com/berkegemenoguz/ege-balancer/internal/health"
+	"github.com/berkegemenoguz/ege-balancer/internal/observability"
 )
+
+// testMetrics returns a registry the tests can write into and ignore.
+func testMetrics() *observability.Metrics {
+	return observability.NewMetrics()
+}
 
 // allHealthy is a checker that knows no backend, so every address it is asked
 // about may serve. Tests that care about health use fakeChecker instead.
@@ -161,7 +167,7 @@ func serveThroughProxy(t *testing.T, backend *httptest.Server, request *http.Req
 
 // newSingleBackend builds a proxy over a pool holding only addr.
 func newSingleBackend(addr string) http.Handler {
-	return New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, allHealthy)
+	return New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, allHealthy, testMetrics())
 }
 
 func TestDistributesAcrossBackends(t *testing.T) {
@@ -177,7 +183,7 @@ func TestDistributesAcrossBackends(t *testing.T) {
 		backends = append(backends, &balancer.Backend{Addr: strings.TrimPrefix(server.URL, "http://")})
 	}
 
-	handler := New(testConfig(), balancer.NewRoundRobin(), backends, allHealthy)
+	handler := New(testConfig(), balancer.NewRoundRobin(), backends, allHealthy, testMetrics())
 	for range requests {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -194,7 +200,7 @@ func TestDistributesAcrossBackends(t *testing.T) {
 }
 
 func TestEmptyPoolReturnsServiceUnavailable(t *testing.T) {
-	handler := New(testConfig(), balancer.NewRoundRobin(), nil, allHealthy)
+	handler := New(testConfig(), balancer.NewRoundRobin(), nil, allHealthy, testMetrics())
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -221,7 +227,7 @@ func TestUnhealthyBackendIsSkipped(t *testing.T) {
 	}
 
 	checker := newFakeChecker(backends[0].Addr)
-	handler := New(testConfig(), balancer.NewRoundRobin(), backends, checker)
+	handler := New(testConfig(), balancer.NewRoundRobin(), backends, checker, testMetrics())
 
 	for range requests {
 		recorder := httptest.NewRecorder()
@@ -242,7 +248,7 @@ func TestUnhealthyBackendIsSkipped(t *testing.T) {
 func TestAllBackendsUnhealthyReturnsServiceUnavailable(t *testing.T) {
 	backend := &balancer.Backend{Addr: "backend-1:5678"}
 	handler := New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{backend},
-		newFakeChecker(backend.Addr))
+		newFakeChecker(backend.Addr), testMetrics())
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -258,7 +264,7 @@ func TestServedRequestIsReportedAsSuccess(t *testing.T) {
 
 	addr := strings.TrimPrefix(backend.URL, "http://")
 	checker := newFakeChecker()
-	handler := New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker)
+	handler := New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker, testMetrics())
 
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 
@@ -275,7 +281,7 @@ func TestUnreachableBackendIsReportedAsFailure(t *testing.T) {
 	const addr = "127.0.0.1:1"
 
 	checker := newFakeChecker()
-	handler := New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker)
+	handler := New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker, testMetrics())
 
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 

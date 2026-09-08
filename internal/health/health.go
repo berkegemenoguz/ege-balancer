@@ -5,7 +5,7 @@ package health
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -149,8 +149,8 @@ func (c *HTTPChecker) record(addr string, succeeded bool) {
 		backend.successes++
 		if !backend.healthy && backend.successes >= c.cfg.HealthyThreshold {
 			backend.healthy = true
-			log.Printf("health: %s is healthy again after %d successful checks",
-				addr, backend.successes)
+			slog.Info("backend is healthy again", "backend", addr,
+				"successful_checks", backend.successes)
 		}
 		return
 	}
@@ -159,7 +159,7 @@ func (c *HTTPChecker) record(addr string, succeeded bool) {
 	backend.failures++
 	if backend.healthy && backend.failures >= c.cfg.UnhealthyThreshold {
 		backend.healthy = false
-		log.Printf("health: %s taken out of the pool after %d failed checks",
-			addr, backend.failures)
+		slog.Warn("backend taken out of the pool", "backend", addr,
+			"failed_checks", backend.failures)
 	}
 }

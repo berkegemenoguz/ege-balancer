@@ -1,10 +1,13 @@
 package proxy
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/berkegemenoguz/ege-balancer/internal/observability"
 )
 
 // idleBucketTTL is how long an untouched bucket is kept before the sweep drops
@@ -21,6 +24,8 @@ type rateLimiter struct {
 	// spend a full second of requests at once and then refills steadily.
 	perSecond float64
 
+	metrics *observability.Metrics
+
 	mu      sync.Mutex
 	buckets map[string]*bucket
 }
@@ -32,9 +37,10 @@ type bucket struct {
 }
 
 // newRateLimiter returns a limiter for the configured per-IP request rate.
-func newRateLimiter(perSecond int) *rateLimiter {
+func newRateLimiter(perSecond int, metrics *observability.Metrics) *rateLimiter {
 	return &rateLimiter{
 		perSecond: float64(perSecond),
+		metrics:   metrics,
 		buckets:   make(map[string]*bucket),
 	}
 }
@@ -46,7 +52,9 @@ func (l *rateLimiter) wrap(next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !l.allow(clientAddr(r), time.Now()) {
+		if client := clientAddr(r); !l.allow(client, time.Now()) {
+			slog.Info("client over the rate limit", "client", client, "path", r.URL.Path)
+			l.metrics.ObserveRejection("rate_limited")
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return

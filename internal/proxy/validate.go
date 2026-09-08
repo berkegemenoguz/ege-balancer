@@ -1,14 +1,21 @@
 package proxy
 
-import "net/http"
+import (
+	"log/slog"
+	"net/http"
+
+	"github.com/berkegemenoguz/ege-balancer/internal/observability"
+)
 
 // validateRequest rejects requests whose framing headers are ambiguous, before
 // any backend sees them. Go's own server already refuses the clearest cases;
 // this repeats the check so that the proxy does not depend on that and covers
 // requests reaching the handler by other paths.
-func validateRequest(next http.Handler) http.Handler {
+func validateRequest(metrics *observability.Metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if suspiciousFraming(r) {
+			slog.Warn("rejected an ambiguously framed request", "path", r.URL.Path)
+			metrics.ObserveRejection("bad_framing")
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}

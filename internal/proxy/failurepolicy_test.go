@@ -43,7 +43,7 @@ func TestRetryNextBackendServesFromAHealthyBackend(t *testing.T) {
 	cfg.FailurePolicy = config.RetryNextBackend
 	cfg.Retry.MaxRetries = 2
 
-	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy),
+	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
 		httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if response.Code != http.StatusOK {
@@ -68,7 +68,7 @@ func TestRetryStopsAtMaxRetries(t *testing.T) {
 	cfg.Retry.MaxRetries = 1
 
 	checker := newFakeChecker()
-	response := send(New(cfg, balancer.NewRoundRobin(), backends, checker),
+	response := send(New(cfg, balancer.NewRoundRobin(), backends, checker, testMetrics()),
 		httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if response.Code != http.StatusServiceUnavailable {
@@ -93,7 +93,7 @@ func TestRetryNeverRepeatsABackend(t *testing.T) {
 	cfg.Retry.MaxRetries = 5
 
 	checker := newFakeChecker()
-	send(New(cfg, balancer.NewRoundRobin(), backends, checker),
+	send(New(cfg, balancer.NewRoundRobin(), backends, checker, testMetrics()),
 		httptest.NewRequest(http.MethodGet, "/", nil))
 
 	_, failures := checker.reported()
@@ -110,7 +110,7 @@ func TestFailFastDoesNotRetry(t *testing.T) {
 	cfg.FailurePolicy = config.FailFast
 	cfg.Retry.MaxRetries = 3 // ignored under fail_fast
 
-	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy),
+	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
 		httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if response.Code != http.StatusServiceUnavailable {
@@ -134,7 +134,7 @@ func TestFivexxIsPassedThroughByDefault(t *testing.T) {
 	cfg.RetryOn5xx = false
 
 	backends := []*balancer.Backend{{Addr: strings.TrimPrefix(backend.URL, "http://")}}
-	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy),
+	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
 		httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if response.Code != http.StatusInternalServerError {
@@ -163,7 +163,7 @@ func TestFivexxIsRetriedWhenConfigured(t *testing.T) {
 	cfg.Retry.MaxRetries = 2
 	cfg.RetryOn5xx = true
 
-	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy),
+	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
 		httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if response.Code != http.StatusOK {
@@ -191,7 +191,7 @@ func TestRetriedRequestKeepsItsBody(t *testing.T) {
 	cfg.FailurePolicy = config.RetryNextBackend
 	cfg.Retry.MaxRetries = 2
 
-	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy),
+	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
 		httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader("payload")))
 
 	if response.Code != http.StatusOK {
@@ -209,7 +209,7 @@ func TestOversizedBodyIsRejected(t *testing.T) {
 	cfg.Limits.MaxRequestBodyBytes = 8
 
 	backends := []*balancer.Backend{{Addr: unreachable}}
-	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy),
+	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
 		httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", 64))))
 
 	if response.Code != http.StatusRequestEntityTooLarge {
@@ -229,7 +229,7 @@ func TestCircuitBreakerShutsOutAndRestoresBackend(t *testing.T) {
 		OpenDuration:     config.Duration(50 * time.Millisecond),
 	}
 
-	handler := New(cfg, balancer.NewRoundRobin(), []*balancer.Backend{dead, alive}, allHealthy)
+	handler := New(cfg, balancer.NewRoundRobin(), []*balancer.Backend{dead, alive}, allHealthy, testMetrics())
 
 	// Round robin alternates, so two rounds give the dead backend its two
 	// failures and trip the breaker.
