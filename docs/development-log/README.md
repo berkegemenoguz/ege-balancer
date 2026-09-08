@@ -16,3 +16,4 @@ places where the two differ.
 | 5 | LB engine: least connections and weighted round robin | [day-05.md](day-05.md) |
 | 6 | Health checker | [day-06.md](day-06.md) |
 | 7 | Proxy core completion | [day-07.md](day-07.md) |
+| 8 | Logging and metrics | [day-08.md](day-08.md) |

@@ -6,9 +6,8 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 strategy, unhealthy backends are taken out of the pool automatically, and the whole
 system is observable through structured logs and Prometheus metrics.
 
-> Status: day 7 of the 12-day plan — the proxy core is complete: configurable failure
-> policies, per-IP rate limiting, request validation and resource limits. Structured logging
-> and metrics come next.
+> Status: day 8 of the 12-day plan — structured logging, Prometheus metrics and a Grafana
+> dashboard. Load testing, resilience testing and the production image are still to come.
 
 ## Features (target for v1.0.0)
 
@@ -50,6 +49,21 @@ Run the tests:
 ```bash
 go test -race -cover ./...
 ```
+
+## Observability
+
+The balancer serves two ports: proxied traffic on `listen_addr`, and observability on
+`metrics_addr`. Keeping them apart means `/metrics` and `/status` stay reachable when the
+traffic port is saturated, and neither path is stolen from the backends.
+
+- `/metrics` — Prometheus format: request rate and latency histogram per backend, backend
+  failures, rejected requests by reason, and live gauges for active connections and health.
+- `/status` — a JSON summary of the pool for a person: algorithm, healthy count, and each
+  backend's weight, health and active connections.
+
+The compose environment includes Prometheus (`localhost:9090`) and Grafana
+(`localhost:3000`, dashboard *Ege-Balancer*). Prometheus scrapes the balancer on the host at
+`host.docker.internal:8081`, so the stack works while the binary runs outside Docker.
 
 ## Project layout
 
