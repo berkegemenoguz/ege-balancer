@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -20,20 +20,22 @@ const shutdownGrace = 30 * time.Second
 
 // Server owns the listening socket and the HTTP server on top of it.
 type Server struct {
+	name     string
 	http     *http.Server
 	listener net.Listener
 }
 
-// New binds the address from the configuration and prepares an HTTP server that
-// serves handler under the configured timeouts and connection limit. The socket
-// is open once New returns, so a caller can read Addr before serving starts.
+// New prepares the server that carries proxied traffic, under the configured
+// timeouts and connection limit. The socket is open once New returns, so a
+// caller can read Addr before serving starts.
 func New(cfg *config.Config, handler http.Handler) (*Server, error) {
-	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	listener, err := listen(cfg.ListenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
+		return nil, err
 	}
 
 	return &Server{
+		name:     "proxy",
 		listener: newLimitListener(listener, cfg.Limits.MaxConnections),
 		http: &http.Server{
 			Handler:      handler,
@@ -42,6 +44,36 @@ func New(cfg *config.Config, handler http.Handler) (*Server, error) {
 			IdleTimeout:  time.Duration(cfg.Timeouts.IdleTimeout),
 		},
 	}, nil
+}
+
+// NewMetrics prepares the server that exposes /metrics and /status. It carries
+// no connection limit: observability must keep working precisely when the
+// traffic port is saturated.
+func NewMetrics(cfg *config.Config, handler http.Handler) (*Server, error) {
+	listener, err := listen(cfg.MetricsAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Server{
+		name:     "metrics",
+		listener: listener,
+		http: &http.Server{
+			Handler:      handler,
+			ReadTimeout:  time.Duration(cfg.Timeouts.ReadTimeout),
+			WriteTimeout: time.Duration(cfg.Timeouts.WriteTimeout),
+			IdleTimeout:  time.Duration(cfg.Timeouts.IdleTimeout),
+		},
+	}, nil
+}
+
+// listen binds addr for serving.
+func listen(addr string) (net.Listener, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+	}
+	return listener, nil
 }
 
 // Addr is the address the server actually listens on, which differs from the
@@ -72,7 +104,7 @@ func (s *Server) Run(ctx context.Context) error {
 // shutdown drains the server, forcing the remaining connections closed if they
 // outlast the grace period.
 func (s *Server) shutdown() error {
-	log.Printf("shutting down, waiting up to %s for in-flight requests", shutdownGrace)
+	slog.Info("shutting down", "server", s.name, "grace", shutdownGrace)
 
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
