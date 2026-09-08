@@ -3,6 +3,7 @@
 # loopback ports 5681 to 5690. Everything else matches configs/lb.example.yaml.
 
 listen_addr: ":8080"
+metrics_addr: ":8081"       # /metrics and /status
 algorithm: round_robin              # round_robin | least_connections | weighted_round_robin
 failure_policy: retry_next_backend  # retry_next_backend | fail_fast | circuit_breaker
 retry_on_5xx: false

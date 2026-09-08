@@ -265,3 +265,31 @@ func TestDurationString(t *testing.T) {
 		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
+
+func TestMetricsAddrDefaultsAndValidates(t *testing.T) {
+	content := strings.Replace(validConfig, "listen_addr: \":8080\"\n",
+		"listen_addr: \":8080\"\nmetrics_addr: \":9999\"\n", 1)
+
+	cfg, err := Load(writeConfig(t, content))
+	if err != nil {
+		t.Fatalf("Load returned an unexpected error: %v", err)
+	}
+	if cfg.MetricsAddr != ":9999" {
+		t.Errorf("MetricsAddr = %q, want the configured %q", cfg.MetricsAddr, ":9999")
+	}
+
+	// Omitting it keeps the observability endpoints on their default port.
+	cfg, err = Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatalf("Load returned an unexpected error: %v", err)
+	}
+	if cfg.MetricsAddr != ":8081" {
+		t.Errorf("omitted metrics_addr = %q, want the default %q", cfg.MetricsAddr, ":8081")
+	}
+
+	broken := strings.Replace(validConfig, "listen_addr: \":8080\"\n",
+		"listen_addr: \":8080\"\nmetrics_addr: \"localhost\"\n", 1)
+	if _, err := Load(writeConfig(t, broken)); err == nil {
+		t.Error("Load accepted a metrics_addr without a port")
+	}
+}

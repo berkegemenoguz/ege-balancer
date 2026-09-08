@@ -53,7 +53,11 @@ const (
 
 // Config is the fully parsed and validated configuration of the load balancer.
 type Config struct {
-	ListenAddr     string         `yaml:"listen_addr"`
+	ListenAddr string `yaml:"listen_addr"`
+	// MetricsAddr serves /metrics and /status on a separate socket, so that
+	// those paths stay proxyable on the traffic port and are not exposed to
+	// clients by accident.
+	MetricsAddr    string         `yaml:"metrics_addr"`
 	Algorithm      Algorithm      `yaml:"algorithm"`
 	FailurePolicy  FailurePolicy  `yaml:"failure_policy"`
 	RetryOn5xx     bool           `yaml:"retry_on_5xx"`
@@ -144,6 +148,9 @@ func Load(path string) (*Config, error) {
 
 // applyDefaults fills in the fields that may be omitted from the file.
 func (c *Config) applyDefaults() {
+	if c.MetricsAddr == "" {
+		c.MetricsAddr = ":8081"
+	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = LevelInfo
 	}

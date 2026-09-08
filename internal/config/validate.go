@@ -21,6 +21,10 @@ func (c *Config) validate() error {
 		add("listen_addr %q is not a host:port address", c.ListenAddr)
 	}
 
+	if _, _, err := net.SplitHostPort(c.MetricsAddr); err != nil {
+		add("metrics_addr %q is not a host:port address", c.MetricsAddr)
+	}
+
 	switch c.Algorithm {
 	case RoundRobin, LeastConnections, WeightedRoundRobin:
 	case "":
