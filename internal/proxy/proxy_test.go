@@ -62,8 +62,15 @@ func (f *fakeChecker) reported() (successes, failures []string) {
 	return append([]string(nil), f.successes...), append([]string(nil), f.failures...)
 }
 
-// testTimeouts are short enough to keep a failing dial from slowing the suite.
-var testTimeouts = config.Timeouts{ConnectTimeout: config.Duration(time.Second)}
+// testConfig is a fail_fast configuration with generous limits; tests change
+// the fields they are about.
+func testConfig() *config.Config {
+	return &config.Config{
+		FailurePolicy: config.FailFast,
+		Timeouts:      config.Timeouts{ConnectTimeout: config.Duration(time.Second)},
+		Limits:        config.Limits{MaxRequestBodyBytes: 1 << 20},
+	}
+}
 
 func TestForwardsRequestToBackend(t *testing.T) {
 	var gotMethod, gotPath, gotBody string
@@ -154,7 +161,7 @@ func serveThroughProxy(t *testing.T, backend *httptest.Server, request *http.Req
 
 // newSingleBackend builds a proxy over a pool holding only addr.
 func newSingleBackend(addr string) http.Handler {
-	return New(balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, allHealthy, testTimeouts)
+	return New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, allHealthy)
 }
 
 func TestDistributesAcrossBackends(t *testing.T) {
@@ -170,7 +177,7 @@ func TestDistributesAcrossBackends(t *testing.T) {
 		backends = append(backends, &balancer.Backend{Addr: strings.TrimPrefix(server.URL, "http://")})
 	}
 
-	handler := New(balancer.NewRoundRobin(), backends, allHealthy, testTimeouts)
+	handler := New(testConfig(), balancer.NewRoundRobin(), backends, allHealthy)
 	for range requests {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -187,7 +194,7 @@ func TestDistributesAcrossBackends(t *testing.T) {
 }
 
 func TestEmptyPoolReturnsServiceUnavailable(t *testing.T) {
-	handler := New(balancer.NewRoundRobin(), nil, allHealthy, testTimeouts)
+	handler := New(testConfig(), balancer.NewRoundRobin(), nil, allHealthy)
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -214,7 +221,7 @@ func TestUnhealthyBackendIsSkipped(t *testing.T) {
 	}
 
 	checker := newFakeChecker(backends[0].Addr)
-	handler := New(balancer.NewRoundRobin(), backends, checker, testTimeouts)
+	handler := New(testConfig(), balancer.NewRoundRobin(), backends, checker)
 
 	for range requests {
 		recorder := httptest.NewRecorder()
@@ -234,8 +241,8 @@ func TestUnhealthyBackendIsSkipped(t *testing.T) {
 
 func TestAllBackendsUnhealthyReturnsServiceUnavailable(t *testing.T) {
 	backend := &balancer.Backend{Addr: "backend-1:5678"}
-	handler := New(balancer.NewRoundRobin(), []*balancer.Backend{backend},
-		newFakeChecker(backend.Addr), testTimeouts)
+	handler := New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{backend},
+		newFakeChecker(backend.Addr))
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -251,7 +258,7 @@ func TestServedRequestIsReportedAsSuccess(t *testing.T) {
 
 	addr := strings.TrimPrefix(backend.URL, "http://")
 	checker := newFakeChecker()
-	handler := New(balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker, testTimeouts)
+	handler := New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker)
 
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 
@@ -268,7 +275,7 @@ func TestUnreachableBackendIsReportedAsFailure(t *testing.T) {
 	const addr = "127.0.0.1:1"
 
 	checker := newFakeChecker()
-	handler := New(balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker, testTimeouts)
+	handler := New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{{Addr: addr}}, checker)
 
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 
