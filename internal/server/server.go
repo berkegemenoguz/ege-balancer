@@ -25,8 +25,8 @@ type Server struct {
 }
 
 // New binds the address from the configuration and prepares an HTTP server that
-// serves handler under the configured timeouts. The socket is open once New
-// returns, so a caller can read Addr before serving starts.
+// serves handler under the configured timeouts and connection limit. The socket
+// is open once New returns, so a caller can read Addr before serving starts.
 func New(cfg *config.Config, handler http.Handler) (*Server, error) {
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
@@ -34,7 +34,7 @@ func New(cfg *config.Config, handler http.Handler) (*Server, error) {
 	}
 
 	return &Server{
-		listener: listener,
+		listener: newLimitListener(listener, cfg.Limits.MaxConnections),
 		http: &http.Server{
 			Handler:      handler,
 			ReadTimeout:  time.Duration(cfg.Timeouts.ReadTimeout),
