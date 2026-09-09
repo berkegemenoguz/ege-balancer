@@ -18,3 +18,4 @@ places where the two differ.
 | 7 | Proxy core completion | [day-07.md](day-07.md) |
 | 8 | Logging and metrics | [day-08.md](day-08.md) |
 | 9 | Integration tests | [day-09.md](day-09.md) |
+| 10 | Load testing and profiling | [day-10.md](day-10.md) |

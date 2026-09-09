@@ -6,9 +6,9 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 strategy, unhealthy backends are taken out of the pool automatically, and the whole
 system is observable through structured logs and Prometheus metrics.
 
-> Status: day 9 of the 12-day plan — an end-to-end integration suite over real sockets covers
-> all three algorithms, health transitions and the failure policies. Load testing, resilience
-> testing and the production image are still to come.
+> Status: day 10 of the 12-day plan — load tested and profiled, at about 41,000 requests per
+> second with no failures up to 2,000 concurrent connections. Resilience testing, config
+> hot-reload and the production image are still to come.
 
 ## Features (target for v1.0.0)
 
@@ -96,6 +96,9 @@ the production readiness criteria, is in [docs/technical-design-v1.6.pdf](docs/t
 
 The [development log](docs/development-log/) keeps one page per day of that plan: what was
 built, which decisions were taken and why, what went wrong, and how the result was verified.
+
+The [performance report](docs/performance-report.md) records the load testing method, the
+bottlenecks profiling exposed, and the throughput and latency before and after each fix.
 
 ## License
 
