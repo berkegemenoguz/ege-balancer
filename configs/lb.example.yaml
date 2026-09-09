@@ -4,6 +4,7 @@
 
 listen_addr: ":8080"
 metrics_addr: ":8081"       # /metrics and /status
+enable_pprof: false         # adds /debug/pprof to the metrics port
 algorithm: round_robin              # round_robin | least_connections | weighted_round_robin
 failure_policy: retry_next_backend  # retry_next_backend | fail_fast | circuit_breaker
 retry_on_5xx: false

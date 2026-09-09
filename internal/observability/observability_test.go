@@ -115,7 +115,7 @@ func TestStatusReportsThePool(t *testing.T) {
 	}})
 
 	recorder := httptest.NewRecorder()
-	Endpoints(NewMetrics(), pool).ServeHTTP(recorder,
+	Endpoints(NewMetrics(), pool, false).ServeHTTP(recorder,
 		httptest.NewRequest(http.MethodGet, "/status", nil))
 
 	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
@@ -179,6 +179,27 @@ func TestLogLevelMapping(t *testing.T) {
 	for level, want := range tests {
 		if got := levelOf(level); got != want {
 			t.Errorf("levelOf(%q) = %v, want %v", level, got, want)
+		}
+	}
+}
+
+func TestPprofIsServedOnlyWhenEnabled(t *testing.T) {
+	pool := NewPool("round_robin", nil, stubChecker{})
+
+	for _, test := range []struct {
+		enabled bool
+		want    int
+	}{
+		{false, http.StatusNotFound},
+		{true, http.StatusOK},
+	} {
+		recorder := httptest.NewRecorder()
+		Endpoints(NewMetrics(), pool, test.enabled).ServeHTTP(recorder,
+			httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil))
+
+		if recorder.Code != test.want {
+			t.Errorf("with pprof enabled=%v the endpoint answered %d, want %d",
+				test.enabled, recorder.Code, test.want)
 		}
 	}
 }

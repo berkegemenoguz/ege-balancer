@@ -57,7 +57,11 @@ type Config struct {
 	// MetricsAddr serves /metrics and /status on a separate socket, so that
 	// those paths stay proxyable on the traffic port and are not exposed to
 	// clients by accident.
-	MetricsAddr    string         `yaml:"metrics_addr"`
+	MetricsAddr string `yaml:"metrics_addr"`
+	// EnablePprof adds the Go profiling endpoints to the metrics server. It is
+	// off by default: those endpoints expose heap and goroutine state, which is
+	// for an operator to reach deliberately, not something to serve always.
+	EnablePprof    bool           `yaml:"enable_pprof"`
 	Algorithm      Algorithm      `yaml:"algorithm"`
 	FailurePolicy  FailurePolicy  `yaml:"failure_policy"`
 	RetryOn5xx     bool           `yaml:"retry_on_5xx"`

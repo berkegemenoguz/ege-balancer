@@ -46,7 +46,7 @@ func New(cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	admin, err := server.NewMetrics(cfg, observability.Endpoints(metrics, pool))
+	admin, err := server.NewMetrics(cfg, observability.Endpoints(metrics, pool, cfg.EnablePprof))
 	if err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package observability
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/pprof"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -104,10 +105,19 @@ func (p *Pool) StatusHandler() http.Handler {
 	})
 }
 
-// Endpoints returns the handler serving /metrics and /status.
-func Endpoints(metrics *Metrics, pool *Pool) http.Handler {
+// Endpoints returns the handler serving /metrics and /status, and the Go
+// profiling endpoints under /debug/pprof when they are enabled.
+func Endpoints(metrics *Metrics, pool *Pool, withPprof bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.Handle("/status", pool.StatusHandler())
+
+	if withPprof {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	}
 	return mux
 }
