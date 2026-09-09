@@ -106,18 +106,13 @@ func TestFailFastSurfacesTheFailure(t *testing.T) {
 	}
 }
 
-func TestClientsGet503WhenEveryBackendIsDown(t *testing.T) {
+func TestClientsGet503WhenEveryBackendIsUnreachable(t *testing.T) {
 	backends := newBackends(t, 2)
 	under := start(t, testConfig(backends))
 
 	for _, b := range backends {
-		b.fail()
+		b.server.Close()
 	}
-	eventually(t, func() bool {
-		return strings.Count(under.scrape(t), `lb_backend_healthy{`) == 2 &&
-			!strings.Contains(under.scrape(t), `lb_backend_healthy{backend="`+backends[0].addr()+`"} 1`) &&
-			!strings.Contains(under.scrape(t), `lb_backend_healthy{backend="`+backends[1].addr()+`"} 1`)
-	}, "both backends are taken out of the pool")
 
 	response, err := http.Get(under.url)
 	if err != nil {
@@ -130,6 +125,36 @@ func TestClientsGet503WhenEveryBackendIsDown(t *testing.T) {
 	}
 	if got := response.Header.Get("Retry-After"); got != "5" {
 		t.Errorf("Retry-After = %q, want %q", got, "5")
+	}
+}
+
+func TestUnhealthyPoolIsStillTried(t *testing.T) {
+	backends := newBackends(t, 2)
+	under := start(t, testConfig(backends))
+
+	// Both backends answer 500, so health checking empties the pool while they
+	// are still reachable. Refusing every request then would turn a degraded
+	// service into an outage, so the balancer offers the request anyway and the
+	// client sees the backend's own answer.
+	for _, b := range backends {
+		b.fail()
+	}
+	eventually(t, func() bool {
+		return !strings.Contains(under.scrape(t), `lb_backend_healthy{backend="`+backends[0].addr()+`"} 1`) &&
+			!strings.Contains(under.scrape(t), `lb_backend_healthy{backend="`+backends[1].addr()+`"} 1`)
+	}, "both backends are taken out of the pool")
+
+	before := backends[0].hits.Load() + backends[1].hits.Load()
+	status, body := under.get(t)
+
+	if status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want the backend's own %d", status, http.StatusInternalServerError)
+	}
+	if body != "backend is unwell" {
+		t.Errorf("body = %q, want the backend's own message", body)
+	}
+	if backends[0].hits.Load()+backends[1].hits.Load() <= before {
+		t.Error("the request was refused instead of being offered to the pool")
 	}
 }
 

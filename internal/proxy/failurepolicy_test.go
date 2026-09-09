@@ -260,3 +260,22 @@ func TestCircuitBreakerShutsOutAndRestoresBackend(t *testing.T) {
 		}
 	}
 }
+
+func TestEveryBackendUnhealthyStillAttemptsThePool(t *testing.T) {
+	var served int
+	backend := echoBackend(t, "backend-1", &served)
+
+	// The checker reports every backend as unhealthy, which is what happens
+	// under overload when the probes are the first requests to time out.
+	handler := New(testConfig(), balancer.NewRoundRobin(), []*balancer.Backend{backend},
+		newFakeChecker(backend.Addr), testMetrics())
+
+	response := send(handler, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if response.Code != http.StatusOK {
+		t.Errorf("status = %d, want the request tried against the pool anyway", response.Code)
+	}
+	if served != 1 {
+		t.Errorf("the backend served %d requests, want 1", served)
+	}
+}
