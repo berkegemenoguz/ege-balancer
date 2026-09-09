@@ -6,8 +6,9 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 strategy, unhealthy backends are taken out of the pool automatically, and the whole
 system is observable through structured logs and Prometheus metrics.
 
-> Status: day 8 of the 12-day plan — structured logging, Prometheus metrics and a Grafana
-> dashboard. Load testing, resilience testing and the production image are still to come.
+> Status: day 9 of the 12-day plan — an end-to-end integration suite over real sockets covers
+> all three algorithms, health transitions and the failure policies. Load testing, resilience
+> testing and the production image are still to come.
 
 ## Features (target for v1.0.0)
 
@@ -49,6 +50,9 @@ Run the tests:
 ```bash
 go test -race -cover ./...
 ```
+
+That includes `internal/integration`, which starts the balancer on real sockets against mock
+backends and drives it over HTTP. It needs no Docker and runs in CI with everything else.
 
 ## Observability
 
