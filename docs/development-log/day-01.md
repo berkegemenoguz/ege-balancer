@@ -20,8 +20,11 @@ a single `docker compose up`.
 **The load balancer service was left out of the compose file, and no Dockerfile was written.**
 The day's deliverable is the backend environment; the proxy could not forward anything yet. A
 container serving nothing, and a Dockerfile to build it, would have been code written for a
-feature that did not exist. The image is day 12's work, and the service was added to compose
-once the proxy could actually serve traffic.
+feature that did not exist. The image is day 12's work.
+
+As it turned out, the balancer still runs on the host rather than in compose: when the monitoring
+stack arrived on day 8, Prometheus was pointed at `host.docker.internal` instead, which kept the
+Dockerfile in day 12 where it belongs.
 
 **Empty packages carry a `doc.go` stating their responsibility, not stub functions.** The
 package comment is documentation the reader needs; a placeholder function would have been dead

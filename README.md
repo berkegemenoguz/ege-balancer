@@ -2,47 +2,68 @@
 
 A modular, high-performance HTTP reverse proxy and load balancer written in Go.
 
-Incoming HTTP traffic is distributed across multiple backends using a configurable
-strategy, unhealthy backends are taken out of the pool automatically, and the whole
-system is observable through structured logs and Prometheus metrics.
+Incoming HTTP traffic is distributed across multiple backends using a configurable strategy,
+unhealthy backends are taken out of the pool automatically, failures are handled by a policy you
+choose, and the whole system is observable through structured logs and Prometheus metrics.
 
-> Status: day 10 of the 12-day plan — load tested and profiled, at about 41,000 requests per
-> second with no failures up to 2,000 concurrent connections. Resilience testing, config
-> hot-reload and the production image are still to come.
+> Status: day 10 of the 12-day plan. Everything below is implemented and tested, except where
+> the *Not yet built* list says otherwise.
 
-## Features (target for v1.0.0)
+## Features
 
-- Three load balancing algorithms, selectable from configuration: round robin,
-  least connections, weighted round robin
-- Active (periodic HTTP probe) and passive (consecutive failure) health checking
-- Configurable failure policies: `retry_next_backend`, `fail_fast`, `circuit_breaker`
-- Graceful shutdown and config hot-reload (SIGHUP)
-- Structured JSON logging and a Prometheus compatible `/metrics` endpoint
-- Basic security baseline: per-IP rate limiting, resource limits, header sanitisation
+- **Three load balancing algorithms**, selectable from configuration: round robin, least
+  connections, and weighted round robin (smooth, so a heavy backend's turns are spread across
+  the cycle rather than bunched together)
+- **Health checking**, active and passive: a periodic HTTP probe, plus the outcome of real
+  traffic, feeding the same consecutive-failure thresholds. An unhealthy backend leaves the pool
+  and rejoins when it recovers
+- **Configurable failure policies**: `retry_next_backend` (never twice to the same backend),
+  `fail_fast`, and `circuit_breaker` with a half-open probe
+- **Resource protection**: per-IP rate limiting, a connection cap enforced at the listener, a
+  request body limit, and timeouts on every phase of a request
+- **Request validation**: ambiguously framed requests are refused before a backend sees them,
+  and `X-Forwarded-For` is rewritten so a client cannot forge its own address
+- **Graceful shutdown**: on SIGINT or SIGTERM the balancer stops accepting connections and lets
+  the requests already in flight finish
+- **Observability**: structured JSON logs, Prometheus metrics, a JSON status endpoint, and
+  optional profiling endpoints
+
+### Not yet built
+
+- Config hot-reload on SIGHUP (day 11)
+- A production Docker image and release pipeline (day 12)
+- TLS termination, HTTP/2 and service discovery — out of scope for v1.0
 
 ## Requirements
 
 - Go 1.27 or newer
-- Docker with Compose (for the mock backend environment)
+- Docker with Compose, for the mock backend environment and the monitoring stack. Not needed to
+  build, test or run the balancer itself.
 
 ## Getting started
 
-Start the ten mock backends:
+Start the ten mock backends, plus Prometheus and Grafana:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-Each backend answers with its own name, so you can verify which one served a request:
+Each backend answers with its own name, so you can see which one served a request:
 
 ```bash
 curl localhost:5681
 ```
 
-Build and run the load balancer:
+Build and run the balancer against them:
 
 ```bash
-go build -o bin/lb ./cmd/lb && ./bin/lb -config configs/lb.example.yaml
+go build -o bin/lb ./cmd/lb && ./bin/lb -config configs/lb.localhost.yaml
+```
+
+Send it some traffic and watch the distribution:
+
+```bash
+for i in $(seq 20); do curl -s localhost:8080; echo; done | sort | uniq -c
 ```
 
 Run the tests:
@@ -54,51 +75,88 @@ go test -race -cover ./...
 That includes `internal/integration`, which starts the balancer on real sockets against mock
 backends and drives it over HTTP. It needs no Docker and runs in CI with everything else.
 
+## Configuration
+
+Two configurations ship with the project, both documenting the full schema:
+
+- `configs/lb.example.yaml` — backends addressed by their compose service names. Use it when the
+  balancer runs inside the compose network.
+- `configs/lb.localhost.yaml` — the same, with the backends addressed on the loopback ports the
+  compose file publishes. Use it when the balancer runs on the host, which is how development
+  works today.
+
+Copy either to `configs/lb.yaml` for local changes; that path is gitignored.
+
+The numeric values in both are starting points. The [performance report](docs/performance-report.md)
+records what the load test says about them.
+
 ## Observability
 
 The balancer serves two ports: proxied traffic on `listen_addr`, and observability on
-`metrics_addr`. Keeping them apart means `/metrics` and `/status` stay reachable when the
-traffic port is saturated, and neither path is stolen from the backends.
+`metrics_addr`. Keeping them apart means `/metrics` and `/status` stay reachable when the traffic
+port is saturated, and neither path is taken away from the backends.
 
-- `/metrics` — Prometheus format: request rate and latency histogram per backend, backend
-  failures, rejected requests by reason, and live gauges for active connections and health.
-- `/status` — a JSON summary of the pool for a person: algorithm, healthy count, and each
-  backend's weight, health and active connections.
+- `/metrics` — Prometheus format: requests by backend and status, a latency histogram, backend
+  failures, rejected requests by reason, and live gauges for active connections and health
+- `/status` — a JSON summary for a person: algorithm, healthy count, and each backend's weight,
+  health and active connections
+- `/debug/pprof/` — Go's profiling endpoints, served only when `enable_pprof` is set. They expose
+  heap and goroutine state, so they are off by default.
 
-The compose environment includes Prometheus (`localhost:9090`) and Grafana
-(`localhost:3000`, dashboard *Ege-Balancer*). Prometheus scrapes the balancer on the host at
+The compose environment includes Prometheus (`localhost:9090`) and Grafana (`localhost:3000`,
+dashboard *Ege-Balancer*, no login). Prometheus scrapes the balancer on the host at
 `host.docker.internal:8081`, so the stack works while the binary runs outside Docker.
+
+## Performance
+
+Measured on a ten core machine that was also running the load generator and all ten backends,
+after the three bottlenecks the profiling found:
+
+| Concurrent connections | Throughput | p50 | p95 | p99 |
+| --- | --- | --- | --- | --- |
+| 100 | 40,616 req/s | 2.1 ms | 5.3 ms | 7.7 ms |
+| 1,000 | 41,208 req/s | 23.6 ms | 46.7 ms | 60.2 ms |
+| 2,000 | 41,421 req/s | 47.3 ms | 87.5 ms | 106.6 ms |
+
+No request failed at any level. The [performance report](docs/performance-report.md) has the
+method, the bottlenecks and the before-and-after numbers.
 
 ## Project layout
 
 ```
-cmd/lb/                    entry point, wires the modules together
-internal/config/           configuration parsing and validation
+cmd/lb/                    entry point: reads configuration, builds the logger, runs the app
+internal/app/              wiring, shared by the binary and the integration tests
+internal/config/           configuration parsing, defaults and validation
 internal/balancer/         LBStrategy interface and the three algorithms
 internal/health/           active and passive health checking
-internal/proxy/            proxy core: forwarding, retry, circuit breaker
-internal/server/           listener and connection lifecycle
-internal/observability/    structured logging and Prometheus metrics
-configs/                   example configuration
-deploy/                    docker-compose environment
-docs/                      technical design document
+internal/proxy/            proxy core: forwarding, failure policies, rate limiting, validation
+internal/server/           listeners, connection limit and graceful shutdown
+internal/observability/    structured logging, Prometheus metrics, status and pprof endpoints
+internal/integration/      end-to-end tests over real sockets
+configs/                   example configurations
+deploy/                    compose environment, Prometheus and Grafana provisioning
+docs/                      design document, development log and performance report
 ```
 
-## Configuration
-
-`configs/lb.example.yaml` documents the full schema. Copy it to `configs/lb.yaml`
-for local changes — that path is gitignored.
+Modules talk to each other through interfaces — `balancer.LBStrategy`, `health.Checker` — so an
+implementation can be replaced without touching the packages that use it.
 
 ## Documentation
 
-The full technical design, including the architecture rationale, the 12-day plan and
-the production readiness criteria, is in [docs/technical-design-v1.6.pdf](docs/technical-design-v1.6.pdf).
+- [Technical design](docs/technical-design-v1.6.pdf) — architecture rationale, the twelve day
+  plan, and the production readiness criteria. The source of truth for scope.
+- [Development log](docs/development-log/) — one page per day: what was built, which decisions
+  were taken and why, what went wrong, and how the result was verified.
+- [Performance report](docs/performance-report.md) — load testing method, the bottlenecks
+  profiling exposed, and throughput and latency before and after each fix.
+- [Design deviations](docs/design-deviations.md) — every place the implementation departs from
+  the design document, with the reasoning.
 
-The [development log](docs/development-log/) keeps one page per day of that plan: what was
-built, which decisions were taken and why, what went wrong, and how the result was verified.
+## Development
 
-The [performance report](docs/performance-report.md) records the load testing method, the
-bottlenecks profiling exposed, and the throughput and latency before and after each fix.
+Work goes straight to `main`, and CI runs on every push: gofmt, `go vet`, golangci-lint,
+govulncheck, build, and the full test suite under `-race`. Commit messages follow
+[Conventional Commits](https://www.conventionalcommits.org/).
 
 ## License
 

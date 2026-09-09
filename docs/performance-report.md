@@ -112,6 +112,9 @@ to 7.7 ms.
 
 ## What this says about the configuration
 
+See [design deviations](design-deviations.md) for the two entries this report produced: the
+fallback when health checking empties the pool, and the restated latency target.
+
 Section 10.3 of the design document proposes p95 latency at a thousand concurrent connections in
 the single digit to low tens of milliseconds. The measurement is 46.7 ms — above that, on a
 machine also running the load generator and all ten backends. At 100 connections, p95 is 5.3 ms,

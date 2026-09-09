@@ -4,8 +4,8 @@ One page per day of the twelve day plan in the technical design document. Each p
 what was built, which decisions were taken and why, what went wrong on the way, and how the
 day's deliverable was verified.
 
-The design document states the plan; this log states what actually happened, including the
-places where the two differ.
+The design document states the plan; this log states what actually happened. Where the two
+differ, the reason is recorded here and collected in [design deviations](../design-deviations.md).
 
 | Day | Focus | Page |
 | --- | --- | --- |
@@ -19,3 +19,5 @@ places where the two differ.
 | 8 | Logging and metrics | [day-08.md](day-08.md) |
 | 9 | Integration tests | [day-09.md](day-09.md) |
 | 10 | Load testing and profiling | [day-10.md](day-10.md) |
+
+Day 10 also produced the [performance report](../performance-report.md).

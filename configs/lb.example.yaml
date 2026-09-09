@@ -1,6 +1,7 @@
 # Example configuration for ege-balancer.
-# Numeric values below are starting points; they are expected to be revised
-# after the day 10 load test (see proposal section 3.3).
+# Numeric values below are starting points. The day 10 load test left them
+# unchanged: nothing here limited throughput up to 2,000 concurrent connections.
+# See docs/performance-report.md.
 
 listen_addr: ":8080"
 metrics_addr: ":8081"       # /metrics and /status
