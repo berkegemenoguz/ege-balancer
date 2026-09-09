@@ -64,7 +64,7 @@ func New(
 		retryOn5xx: cfg.RetryOn5xx,
 		maxBody:    cfg.Limits.MaxRequestBodyBytes,
 	}
-	core.forward = core.newReverseProxy(cfg.Timeouts)
+	core.forward = core.newReverseProxy(cfg, len(backends))
 
 	return newRateLimiter(cfg.Limits.RateLimitPerIP, metrics).wrap(validateRequest(metrics, core))
 }
@@ -83,7 +83,7 @@ func attemptsFor(cfg *config.Config) int {
 
 // newReverseProxy builds the forwarder shared by every attempt. The backend to
 // use is carried on the request context, so one instance serves all of them.
-func (c *Core) newReverseProxy(timeouts config.Timeouts) *httputil.ReverseProxy {
+func (c *Core) newReverseProxy(cfg *config.Config, backendCount int) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(&url.URL{Scheme: "http", Host: backendFrom(r.In.Context()).Addr})
@@ -91,7 +91,8 @@ func (c *Core) newReverseProxy(timeouts config.Timeouts) *httputil.ReverseProxy 
 			// cannot forge the address the backend sees.
 			r.SetXForwarded()
 		},
-		Transport: transport(timeouts),
+		Transport:  transport(cfg, backendCount),
+		BufferPool: newBufferPool(),
 		ModifyResponse: func(response *http.Response) error {
 			if c.retryOn5xx && response.StatusCode >= http.StatusInternalServerError {
 				return errRetryable5xx
@@ -171,12 +172,29 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, backend *balancer.B
 
 // available returns the backends that may serve the request now: healthy, not
 // tripped by the circuit breaker, and not already tried for this request.
+//
+// If health checking has emptied the pool completely, the untried backends are
+// returned anyway. Under overload the probes are the first thing to time out,
+// and every backend can be marked unhealthy at once; refusing all traffic then
+// turns a slow system into a broken one, while trying a backend that may still
+// answer costs one attempt.
 func (c *Core) available(tried map[string]bool) []*balancer.Backend {
 	fit := make([]*balancer.Backend, 0, len(c.backends))
+	untried := make([]*balancer.Backend, 0, len(c.backends))
+
 	for _, backend := range c.backends {
-		if !tried[backend.Addr] && c.checker.IsHealthy(backend.Addr) && c.breaker.allow(backend.Addr) {
+		if tried[backend.Addr] {
+			continue
+		}
+		untried = append(untried, backend)
+		if c.checker.IsHealthy(backend.Addr) && c.breaker.allow(backend.Addr) {
 			fit = append(fit, backend)
 		}
+	}
+
+	if len(fit) == 0 && len(untried) > 0 {
+		c.metrics.ObserveRejection("no_healthy_backend")
+		return untried
 	}
 	return fit
 }
@@ -239,12 +257,38 @@ func unavailable(w http.ResponseWriter) {
 	http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 }
 
-// transport applies the configured connect timeout to every upstream dial.
-func transport(timeouts config.Timeouts) http.RoundTripper {
+// transport carries requests to the backends. Its connection pool is sized to
+// the traffic the balancer accepts: Go's default keeps only two idle
+// connections per host, which under load makes the proxy open a fresh TCP
+// connection for nearly every request, exhaust the ephemeral port range and
+// start failing with "can't assign requested address".
+func transport(cfg *config.Config, backendCount int) http.RoundTripper {
 	base := http.DefaultTransport.(*http.Transport).Clone()
 	base.DialContext = (&net.Dialer{
-		Timeout:   time.Duration(timeouts.ConnectTimeout),
+		Timeout:   time.Duration(cfg.Timeouts.ConnectTimeout),
 		KeepAlive: 30 * time.Second,
 	}).DialContext
+
+	// Inbound connections are capped, so at most that many requests can be in
+	// flight upstream; sharing that budget across the pool bounds the idle
+	// connections without throttling reuse.
+	base.MaxIdleConns = cfg.Limits.MaxConnections
+	base.MaxIdleConnsPerHost = idleConnsPerBackend(cfg.Limits.MaxConnections, backendCount)
+	base.IdleConnTimeout = time.Duration(cfg.Timeouts.IdleTimeout)
+
 	return base
+}
+
+// idleConnsPerBackend divides the connection budget over the pool, keeping
+// enough per backend to be useful when the budget is small or the pool large.
+func idleConnsPerBackend(maxConnections, backendCount int) int {
+	const minimum = 32
+
+	if backendCount < 1 {
+		backendCount = 1
+	}
+	if share := maxConnections / backendCount; share > minimum {
+		return share
+	}
+	return minimum
 }
