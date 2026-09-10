@@ -36,3 +36,8 @@ jobs:
 
       - name: Test
         run: go test -race -cover ./...
+
+      # The image is part of the deliverable, so a change that breaks it should
+      # fail here rather than at release time.
+      - name: Build the container image
+        run: docker build --build-arg VERSION=ci -t ege-balancer:ci .
