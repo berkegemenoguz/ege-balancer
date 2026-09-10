@@ -8,24 +8,55 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/berkegemenoguz/ege-balancer/internal/app"
 )
 
+// received is what the backend saw of a forwarded request. It is guarded
+// because the health checker probes the same handler while the request under
+// test is in flight.
+type received struct {
+	mu sync.Mutex
+
+	method, path, query, body string
+	requestID, forwardedFor   string
+}
+
+func (r *received) record(request *http.Request, body string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.method, r.path = request.Method, request.URL.Path
+	r.query, r.body = request.URL.RawQuery, body
+	r.requestID = request.Header.Get("X-Request-Id")
+	r.forwardedFor = request.Header.Get("X-Forwarded-For")
+}
+
+func (r *received) read() received {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return received{
+		method: r.method, path: r.path, query: r.query, body: r.body,
+		requestID: r.requestID, forwardedFor: r.forwardedFor,
+	}
+}
+
 func TestRequestAndResponseSurviveTheProxy(t *testing.T) {
-	var (
-		gotMethod, gotPath, gotQuery, gotBody string
-		gotHeader, gotForwardedFor            string
-	)
+	var seen received
 
 	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health probes reach this handler too; they are not the request under
+		// test and must not overwrite what it saw.
+		if r.URL.Path == "/healthz" {
+			return
+		}
+
 		body, _ := io.ReadAll(r.Body)
-		gotMethod, gotPath = r.Method, r.URL.Path
-		gotQuery, gotBody = r.URL.RawQuery, string(body)
-		gotHeader = r.Header.Get("X-Request-Id")
-		gotForwardedFor = r.Header.Get("X-Forwarded-For")
+		seen.record(r, string(body))
 
 		w.Header().Set("X-Backend", "echo")
 		w.WriteHeader(http.StatusCreated)
@@ -54,16 +85,17 @@ func TestRequestAndResponseSurviveTheProxy(t *testing.T) {
 	defer func() { _ = response.Body.Close() }()
 
 	body, _ := io.ReadAll(response.Body)
+	got := seen.read()
 
 	for _, check := range []struct {
 		what      string
 		got, want string
 	}{
-		{"method", gotMethod, http.MethodPut},
-		{"path", gotPath, "/orders/42"},
-		{"query", gotQuery, "dry=true"},
-		{"body", gotBody, "payload"},
-		{"forwarded header", gotHeader, "abc-123"},
+		{"method", got.method, http.MethodPut},
+		{"path", got.path, "/orders/42"},
+		{"query", got.query, "dry=true"},
+		{"body", got.body, "payload"},
+		{"forwarded header", got.requestID, "abc-123"},
 		{"response body", string(body), "created"},
 		{"response header", response.Header.Get("X-Backend"), "echo"},
 	} {
@@ -74,11 +106,11 @@ func TestRequestAndResponseSurviveTheProxy(t *testing.T) {
 	if response.StatusCode != http.StatusCreated {
 		t.Errorf("status = %d, want %d", response.StatusCode, http.StatusCreated)
 	}
-	if gotForwardedFor == "10.0.0.1" {
+	if got.forwardedFor == "10.0.0.1" {
 		t.Error("the client's forged X-Forwarded-For reached the backend unchanged")
 	}
-	if !strings.HasPrefix(gotForwardedFor, "127.0.0.1") {
-		t.Errorf("X-Forwarded-For = %q, want the real client address", gotForwardedFor)
+	if !strings.HasPrefix(got.forwardedFor, "127.0.0.1") {
+		t.Errorf("X-Forwarded-For = %q, want the real client address", got.forwardedFor)
 	}
 }
 
