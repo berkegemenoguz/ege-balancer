@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -147,14 +148,17 @@ func TestShutdownLetsInFlightRequestsFinish(t *testing.T) {
 	backends[0].slowDown(300 * time.Millisecond)
 
 	cfg := testConfig(backends)
-	assembled, err := app.New(cfg)
+	path := filepath.Join(t.TempDir(), "lb.yaml")
+	writeConfig(t, path, cfg)
+
+	assembled, err := app.New(cfg, path)
 	if err != nil {
 		t.Fatalf("assembling the balancer failed: %v", err)
 	}
 
 	ctx, stop := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- assembled.Run(ctx) }()
+	go func() { done <- assembled.Run(ctx, nil) }()
 
 	type result struct {
 		status int

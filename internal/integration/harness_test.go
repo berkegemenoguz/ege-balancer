@@ -4,17 +4,21 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/berkegemenoguz/ege-balancer/internal/app"
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
@@ -122,7 +126,8 @@ func testConfig(backends []*backend, weights ...int) *config.Config {
 			UnhealthyThreshold: 2,
 		},
 		Timeouts: config.Timeouts{
-			ConnectTimeout: config.Duration(time.Second),
+			ConnectTimeout:  config.Duration(time.Second),
+			ResponseTimeout: config.Duration(2 * time.Second),
 			// Kept short on purpose: a client opening more connections than it
 			// uses leaves some that never send a request, and shutdown waits
 			// for those until their read timeout expires.
@@ -142,33 +147,110 @@ func testConfig(backends []*backend, weights ...int) *config.Config {
 type balancerUnderTest struct {
 	url        string
 	metricsURL string
+	configPath string
+	reload     chan struct{}
 	stop       context.CancelFunc
 	done       <-chan error
 }
 
-// start assembles and runs the balancer described by cfg, and stops it when the
-// test ends.
+// writeConfig renders cfg as YAML at path, the way an operator would edit it.
+func writeConfig(t *testing.T, path string, cfg *config.Config) {
+	t.Helper()
+
+	encoded, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("encoding the configuration failed: %v", err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatalf("writing the configuration failed: %v", err)
+	}
+}
+
+// start writes cfg to a file, assembles the balancer from it, and runs it until
+// the test ends. Going through a file is what the binary does, and it is what
+// lets a test reload.
 func start(t *testing.T, cfg *config.Config) *balancerUnderTest {
 	t.Helper()
 
-	assembled, err := app.New(cfg)
+	path := filepath.Join(t.TempDir(), "lb.yaml")
+	writeConfig(t, path, cfg)
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("the test configuration is not valid: %v", err)
+	}
+
+	assembled, err := app.New(loaded, path)
 	if err != nil {
 		t.Fatalf("assembling the balancer failed: %v", err)
 	}
 
 	ctx, stop := context.WithCancel(t.Context())
+	reload := make(chan struct{})
 	done := make(chan error, 1)
-	go func() { done <- assembled.Run(ctx) }()
+	go func() { done <- assembled.Run(ctx, reload) }()
 
 	under := &balancerUnderTest{
 		url:        "http://" + assembled.Addr(),
 		metricsURL: "http://" + assembled.MetricsAddr(),
+		configPath: path,
+		reload:     reload,
 		stop:       stop,
 		done:       done,
 	}
 	t.Cleanup(func() { under.shutdown(t) })
 
 	return under
+}
+
+// reconfigure rewrites the configuration file, asks the balancer to reload it
+// the way sending SIGHUP would, and waits until the new configuration is the
+// one being served.
+func (b *balancerUnderTest) reconfigure(t *testing.T, cfg *config.Config) {
+	t.Helper()
+
+	applied := b.status(t).Reloads
+	writeConfig(t, b.configPath, cfg)
+	b.requestReload(t)
+
+	eventually(t, func() bool { return b.status(t).Reloads > applied },
+		"the new configuration is applied")
+}
+
+// requestReload asks for a reload of whatever the configuration file now holds.
+func (b *balancerUnderTest) requestReload(t *testing.T) {
+	t.Helper()
+
+	select {
+	case b.reload <- struct{}{}:
+	case <-time.After(time.Second):
+		t.Fatal("the balancer did not accept a reload request")
+	}
+}
+
+// reportedStatus is the part of /status the tests read.
+type reportedStatus struct {
+	Algorithm string `json:"algorithm"`
+	Reloads   int64  `json:"reloads"`
+	Healthy   int    `json:"healthy_backends"`
+	Total     int    `json:"total_backends"`
+}
+
+// status reads the balancer's own view of itself.
+func (b *balancerUnderTest) status(t *testing.T) reportedStatus {
+	t.Helper()
+
+	response, err := http.Get(b.metricsURL + "/status")
+	if err != nil {
+		t.Fatalf("status request failed: %v", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+
+	var reported reportedStatus
+	if err := json.NewDecoder(response.Body).Decode(&reported); err != nil {
+		t.Fatalf("decoding status failed: %v", err)
+	}
+	return reported
 }
 
 // shutdown stops the balancer and reports an unclean exit.

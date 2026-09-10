@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
 )
@@ -182,5 +183,127 @@ func TestRateLimitProtectsTheBackends(t *testing.T) {
 	served := backends[0].hits.Load() + backends[1].hits.Load()
 	if served > int64(limit+1) {
 		t.Errorf("the backends served %d requests, want the limiter to stop the rest", served)
+	}
+}
+
+func TestSuddenBackendLossIsAbsorbed(t *testing.T) {
+	const requests = 40
+
+	backends := newBackends(t, 4)
+	cfg := testConfig(backends)
+	cfg.FailurePolicy = config.RetryNextBackend
+	cfg.Retry.MaxRetries = 2
+
+	under := start(t, cfg)
+	under.send(t, requests)
+
+	// Two of the four vanish mid-flight, without warning.
+	backends[1].server.Close()
+	backends[3].server.Close()
+
+	bodies, statuses := under.send(t, requests)
+
+	if statuses[http.StatusOK] != requests {
+		t.Errorf("%d of %d requests succeeded after losing half the pool, want all",
+			statuses[http.StatusOK], requests)
+	}
+	if bodies[backends[0].name]+bodies[backends[2].name] != requests {
+		t.Error("the surviving backends did not carry every request")
+	}
+}
+
+func TestSlowBackendIsBoundedByTheTimeout(t *testing.T) {
+	backends := newBackends(t, 2)
+	// Far longer than the response timeout below, so the request cannot finish.
+	backends[0].slowDown(3 * time.Second)
+
+	cfg := testConfig(backends)
+	cfg.FailurePolicy = config.RetryNextBackend
+	cfg.Retry.MaxRetries = 1
+	cfg.Timeouts.ResponseTimeout = config.Duration(200 * time.Millisecond)
+
+	under := start(t, cfg)
+
+	started := time.Now()
+	status, body := under.get(t)
+	took := time.Since(started)
+
+	if status != http.StatusOK || body != backends[1].name {
+		t.Errorf("answered %d %q, want the fast backend to serve it", status, body)
+	}
+	if took > 2*time.Second {
+		t.Errorf("the request took %s, want the slow backend to be abandoned quickly", took)
+	}
+}
+
+func TestPoolRecoversAfterEveryBackendFails(t *testing.T) {
+	const requests = 20
+
+	backends := newBackends(t, 3)
+	under := start(t, testConfig(backends))
+
+	for _, b := range backends {
+		b.fail()
+	}
+	eventually(t, func() bool { return under.status(t).Healthy == 0 },
+		"the whole pool is marked unhealthy")
+
+	for _, b := range backends {
+		b.heal()
+	}
+	eventually(t, func() bool { return under.status(t).Healthy == len(backends) },
+		"the whole pool recovers")
+
+	bodies, statuses := under.send(t, requests)
+	if statuses[http.StatusOK] != requests {
+		t.Errorf("%d of %d requests succeeded after recovery, want all",
+			statuses[http.StatusOK], requests)
+	}
+	for _, b := range backends {
+		if bodies[b.name] == 0 {
+			t.Errorf("%s received no traffic after recovering", b.name)
+		}
+	}
+}
+
+func TestBackendFlappingDoesNotLoseRequests(t *testing.T) {
+	backends := newBackends(t, 3)
+	cfg := testConfig(backends)
+	cfg.FailurePolicy = config.RetryNextBackend
+	cfg.Retry.MaxRetries = 2
+
+	under := start(t, cfg)
+
+	// One backend goes up and down repeatedly while traffic flows.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 10 {
+			backends[1].fail()
+			time.Sleep(15 * time.Millisecond)
+			backends[1].heal()
+			time.Sleep(15 * time.Millisecond)
+		}
+	}()
+
+	var served, failed int
+	for range 60 {
+		if status, _ := under.get(t); status == http.StatusOK {
+			served++
+		} else {
+			failed++
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	<-done
+
+	// A backend answering 500 is passed through by default, so some requests
+	// legitimately carry its error; what must not happen is the balancer
+	// failing requests of its own.
+	if served == 0 {
+		t.Fatal("no request was served while a backend was flapping")
+	}
+	if failed > 20 {
+		t.Errorf("%d of 60 requests failed while one backend of three flapped", failed)
 	}
 }
