@@ -5,7 +5,9 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,9 +17,18 @@ import (
 	"github.com/berkegemenoguz/ege-balancer/internal/observability"
 )
 
+// version is stamped in at build time; it is "dev" for a local build.
+var version = "dev"
+
 func main() {
 	configPath := flag.String("config", "configs/lb.example.yaml", "path to the configuration file")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("ege-balancer", version)
+		return
+	}
 
 	if err := run(*configPath); err != nil {
 		// The structured logger may not exist yet when configuration fails.
@@ -31,6 +42,7 @@ func run(configPath string) error {
 		return err
 	}
 	observability.NewLogger(cfg.Logging)
+	slog.Info("starting", "version", version)
 
 	balancer, err := app.New(cfg, configPath)
 	if err != nil {
