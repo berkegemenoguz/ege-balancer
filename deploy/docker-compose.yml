@@ -88,10 +88,15 @@ services:
     volumes: ["./grafana:/etc/grafana/provisioning"]
     ports: ["3000:3000"]
     depends_on: [prometheus]
-    # Grafana 13 idles inside 256 MB but is killed while rendering the
-    # dashboard, so it gets twice what the design document suggested.
-    mem_limit: 512m
+    # Grafana 13 needs considerably more than the 256 MB the design document
+    # suggests: it idles inside that but is killed while rendering a dashboard.
+    mem_limit: 1g
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      # Grafana is a Go program, and without a budget the runtime lets the heap
+      # grow until it hits the container limit and the process is killed. Told
+      # its budget, it collects garbage before that point; the remaining 256 MB
+      # of the limit covers what the runtime allocates outside the heap.
+      GOMEMLIMIT: 768MiB

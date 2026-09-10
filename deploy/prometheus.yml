@@ -1,7 +1,10 @@
-# Prometheus scrapes the load balancer, which runs on the host during
-# development while the mock backends run in containers.
+# Prometheus scrapes the load balancer's metrics port. The balancer runs as a
+# compose service alongside the mock backends it forwards to.
 global:
-  scrape_interval: 15s
+  # Five seconds in this development stack, so the dashboard reacts while
+  # someone is watching it. The production guidance is 15s; see section 7.6 of
+  # the technical design document.
+  scrape_interval: 5s
 
 scrape_configs:
   - job_name: ege-balancer
