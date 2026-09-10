@@ -25,6 +25,12 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// MarshalYAML writes the duration back in the form it is read in, so that a
+// configuration can be round-tripped.
+func (d Duration) MarshalYAML() (any, error) {
+	return d.String(), nil
+}
+
 func (d Duration) String() string {
 	return time.Duration(d).String()
 }

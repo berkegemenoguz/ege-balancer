@@ -103,12 +103,19 @@ type HealthCheck struct {
 	UnhealthyThreshold int      `yaml:"unhealthy_threshold"`
 }
 
-// Timeouts bound every phase of proxying a request.
+// Timeouts bound every phase of proxying a request. Connect and response bound
+// the conversation with a backend; read, write and idle bound the one with the
+// client.
 type Timeouts struct {
 	ConnectTimeout Duration `yaml:"connect_timeout"`
-	ReadTimeout    Duration `yaml:"read_timeout"`
-	WriteTimeout   Duration `yaml:"write_timeout"`
-	IdleTimeout    Duration `yaml:"idle_timeout"`
+	// ResponseTimeout is how long a backend may take to start answering before
+	// the attempt is abandoned. Without it a slow backend holds a request until
+	// the client-side write timeout kills it, with no chance to try another
+	// backend. Defaults to the read timeout when omitted.
+	ResponseTimeout Duration `yaml:"response_timeout"`
+	ReadTimeout     Duration `yaml:"read_timeout"`
+	WriteTimeout    Duration `yaml:"write_timeout"`
+	IdleTimeout     Duration `yaml:"idle_timeout"`
 }
 
 // Limits protect the load balancer from exhausting its own resources.
@@ -154,6 +161,9 @@ func Load(path string) (*Config, error) {
 func (c *Config) applyDefaults() {
 	if c.MetricsAddr == "" {
 		c.MetricsAddr = ":8081"
+	}
+	if c.Timeouts.ResponseTimeout == 0 {
+		c.Timeouts.ResponseTimeout = c.Timeouts.ReadTimeout
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = LevelInfo

@@ -132,6 +132,7 @@ func (c *Config) validateTimeouts() []error {
 		value Duration
 	}{
 		{"connect_timeout", c.Timeouts.ConnectTimeout},
+		{"response_timeout", c.Timeouts.ResponseTimeout},
 		{"read_timeout", c.Timeouts.ReadTimeout},
 		{"write_timeout", c.Timeouts.WriteTimeout},
 		{"idle_timeout", c.Timeouts.IdleTimeout},
