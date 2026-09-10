@@ -58,3 +58,33 @@ func TestSelectOnEmptyPool(t *testing.T) {
 		t.Errorf("backend = %s, want nil", backend.Addr)
 	}
 }
+
+func TestMergeBackendsKeepsTheBackendsThatSurvive(t *testing.T) {
+	existing := BackendsFromConfig([]config.Backend{
+		{Addr: "backend-1:5678", Weight: 1},
+		{Addr: "backend-2:5678", Weight: 1},
+	})
+	existing[0].Acquire()
+	existing[0].Acquire()
+
+	merged := MergeBackends(existing, []config.Backend{
+		{Addr: "backend-1:5678", Weight: 5},
+		{Addr: "backend-3:5678", Weight: 1},
+	})
+
+	if len(merged) != 2 {
+		t.Fatalf("len = %d, want the two configured backends", len(merged))
+	}
+	if merged[0] != existing[0] {
+		t.Error("a surviving backend was replaced, losing its connection count")
+	}
+	if got := merged[0].ActiveConnections(); got != 2 {
+		t.Errorf("active connections = %d, want the 2 in flight to be kept", got)
+	}
+	if merged[0].Weight != 5 {
+		t.Errorf("weight = %d, want the reconfigured 5", merged[0].Weight)
+	}
+	if merged[1].Addr != "backend-3:5678" {
+		t.Errorf("merged[1] = %s, want the newly added backend", merged[1].Addr)
+	}
+}

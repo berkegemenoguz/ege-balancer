@@ -44,6 +44,8 @@ func newFakeChecker(unhealthy ...string) *fakeChecker {
 
 func (f *fakeChecker) Start(context.Context, []*balancer.Backend) {}
 
+func (f *fakeChecker) Reload(context.Context, config.HealthCheck, []*balancer.Backend) {}
+
 func (f *fakeChecker) IsHealthy(addr string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

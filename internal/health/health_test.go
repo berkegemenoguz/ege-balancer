@@ -200,3 +200,59 @@ func TestCheckerIsConcurrencySafe(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestReloadKeepsWhatIsKnownAboutSurvivingBackends(t *testing.T) {
+	cfg := testConfig()
+	checker := New(cfg)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // no active probing; the passive path is what is under test
+
+	const (
+		staying = "backend-1:5678"
+		leaving = "backend-2:5678"
+		joining = "backend-3:5678"
+	)
+
+	checker.Start(ctx, []*balancer.Backend{{Addr: staying}, {Addr: leaving}})
+	for range cfg.UnhealthyThreshold {
+		checker.ReportFailure(staying)
+	}
+	if checker.IsHealthy(staying) {
+		t.Fatal("the backend did not leave the pool")
+	}
+
+	checker.Reload(ctx, cfg, []*balancer.Backend{{Addr: staying}, {Addr: joining}})
+
+	if checker.IsHealthy(staying) {
+		t.Error("a reload handed a known-unhealthy backend a clean slate")
+	}
+	if !checker.IsHealthy(joining) {
+		t.Error("a backend added by a reload did not start healthy")
+	}
+
+	// The removed backend is forgotten, so reports about it change nothing.
+	for range cfg.UnhealthyThreshold {
+		checker.ReportFailure(leaving)
+	}
+	if !checker.IsHealthy(leaving) {
+		t.Error("a backend dropped by a reload is still being tracked")
+	}
+}
+
+func TestReloadAppliesNewThresholds(t *testing.T) {
+	cfg := testConfig()
+	checker := New(cfg)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	checker.Start(ctx, []*balancer.Backend{{Addr: "backend-1:5678"}})
+
+	stricter := cfg
+	stricter.UnhealthyThreshold = 1
+	checker.Reload(ctx, stricter, []*balancer.Backend{{Addr: "backend-1:5678"}})
+
+	checker.ReportFailure("backend-1:5678")
+	if checker.IsHealthy("backend-1:5678") {
+		t.Error("the reloaded threshold of one failure was not applied")
+	}
+}

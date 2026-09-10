@@ -17,10 +17,11 @@ import (
 // stubChecker reports the health the test asks for.
 type stubChecker struct{ unhealthy map[string]bool }
 
-func (s stubChecker) Start(context.Context, []*balancer.Backend) {}
-func (s stubChecker) IsHealthy(addr string) bool                 { return !s.unhealthy[addr] }
-func (s stubChecker) ReportSuccess(string)                       {}
-func (s stubChecker) ReportFailure(string)                       {}
+func (s stubChecker) Start(context.Context, []*balancer.Backend)                      {}
+func (s stubChecker) Reload(context.Context, config.HealthCheck, []*balancer.Backend) {}
+func (s stubChecker) IsHealthy(addr string) bool                                      { return !s.unhealthy[addr] }
+func (s stubChecker) ReportSuccess(string)                                            {}
+func (s stubChecker) ReportFailure(string)                                            {}
 
 // scrape renders the metrics endpoint as text.
 func scrape(t *testing.T, handler http.Handler) string {
@@ -200,6 +201,56 @@ func TestPprofIsServedOnlyWhenEnabled(t *testing.T) {
 		if recorder.Code != test.want {
 			t.Errorf("with pprof enabled=%v the endpoint answered %d, want %d",
 				test.enabled, recorder.Code, test.want)
+		}
+	}
+}
+
+func TestPoolReloadFollowsTheNewBackends(t *testing.T) {
+	first := []*balancer.Backend{{Addr: "backend-1:5678", Weight: 1}}
+	pool := NewPool("round_robin", first, stubChecker{})
+
+	metrics := NewMetrics()
+	metrics.Register(pool)
+
+	pool.Reload("least_connections", []*balancer.Backend{{Addr: "backend-2:5678", Weight: 2}})
+
+	body := scrape(t, metrics.Handler())
+	if strings.Contains(body, `backend="backend-1:5678"`) {
+		t.Error("a backend removed by a reload is still reported")
+	}
+	if !strings.Contains(body, `lb_backend_healthy{backend="backend-2:5678"} 1`) {
+		t.Error("the backend added by a reload is not reported")
+	}
+
+	recorder := httptest.NewRecorder()
+	Endpoints(metrics, pool, false).ServeHTTP(recorder,
+		httptest.NewRequest(http.MethodGet, "/status", nil))
+
+	var reported status
+	if err := json.NewDecoder(recorder.Body).Decode(&reported); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if reported.Algorithm != "least_connections" {
+		t.Errorf("algorithm = %q, want the reloaded one", reported.Algorithm)
+	}
+	if reported.Reloads != 1 {
+		t.Errorf("reloads = %d, want 1", reported.Reloads)
+	}
+}
+
+func TestReloadOutcomesAreCounted(t *testing.T) {
+	metrics := NewMetrics()
+	metrics.ObserveReload("applied")
+	metrics.ObserveReload("rejected")
+	metrics.ObserveReload("rejected")
+
+	body := scrape(t, metrics.Handler())
+	for _, want := range []string{
+		`lb_config_reloads_total{result="applied"} 1`,
+		`lb_config_reloads_total{result="rejected"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics do not contain %q", want)
 		}
 	}
 }

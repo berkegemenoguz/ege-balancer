@@ -293,3 +293,52 @@ func TestMetricsAddrDefaultsAndValidates(t *testing.T) {
 		t.Error("Load accepted a metrics_addr without a port")
 	}
 }
+
+func TestResponseTimeoutDefaultsToTheReadTimeout(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatalf("Load returned an unexpected error: %v", err)
+	}
+	if cfg.Timeouts.ResponseTimeout != cfg.Timeouts.ReadTimeout {
+		t.Errorf("omitted response_timeout = %s, want the read timeout %s",
+			cfg.Timeouts.ResponseTimeout, cfg.Timeouts.ReadTimeout)
+	}
+
+	explicit := replace(t, "  connect_timeout:", "  connect_timeout: 2s\n  response_timeout: 3s")
+	cfg, err = Load(writeConfig(t, explicit))
+	if err != nil {
+		t.Fatalf("Load returned an unexpected error: %v", err)
+	}
+	if got, want := time.Duration(cfg.Timeouts.ResponseTimeout), 3*time.Second; got != want {
+		t.Errorf("response_timeout = %s, want %s", got, want)
+	}
+}
+
+func TestRequiresRestartNamesUnchangeableSettings(t *testing.T) {
+	running, err := Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatalf("Load returned an unexpected error: %v", err)
+	}
+
+	next, err := Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatalf("Load returned an unexpected error: %v", err)
+	}
+	if fixed := running.RequiresRestart(next); len(fixed) != 0 {
+		t.Errorf("an unchanged configuration reported %v as needing a restart", fixed)
+	}
+
+	next.ListenAddr = ":9090"
+	next.Limits.MaxConnections = 5
+	next.Algorithm = LeastConnections // reloadable, must not be listed
+
+	fixed := running.RequiresRestart(next)
+	if len(fixed) != 2 {
+		t.Fatalf("RequiresRestart = %v, want the two unchangeable settings", fixed)
+	}
+	for _, want := range []string{"listen_addr", "limits.max_connections"} {
+		if !strings.Contains(strings.Join(fixed, " "), want) {
+			t.Errorf("RequiresRestart = %v, want it to name %q", fixed, want)
+		}
+	}
+}
