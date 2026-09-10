@@ -69,7 +69,7 @@ func run(ctx context.Context, con *console, env *environment) error {
 	welcome(con, env, current)
 
 	for ctx.Err() == nil {
-		switch choice := con.ask(prompt(flow)); choice {
+		switch choice := con.ask(prompt(ctx, env, flow)); choice {
 		case "1":
 			toggleTraffic(con, flow)
 		case "2":
@@ -118,12 +118,18 @@ func welcome(con *console, env *environment, current status) {
 	con.note("every action prints the command it runs, so it can be repeated by hand")
 }
 
-// prompt renders the menu prompt, showing whether traffic is flowing.
-func prompt(flow *traffic) string {
-	if flow.running() {
-		return "[traffic on] action?"
+// prompt renders the menu prompt. It names the algorithm in force, because a
+// change made several actions ago is otherwise easy to forget and makes the
+// next measurement look wrong.
+func prompt(ctx context.Context, env *environment, flow *traffic) string {
+	state := mustStatus(ctx, env).Algorithm
+	if state == "" {
+		state = "unreachable"
 	}
-	return "action?"
+	if flow.running() {
+		state += " · traffic on"
+	}
+	return "[" + state + "] action?"
 }
 
 // toggleTraffic starts or stops the background stream.
