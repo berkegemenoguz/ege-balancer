@@ -19,5 +19,6 @@ differ, the reason is recorded here and collected in [design deviations](../desi
 | 8 | Logging and metrics | [day-08.md](day-08.md) |
 | 9 | Integration tests | [day-09.md](day-09.md) |
 | 10 | Load testing and profiling | [day-10.md](day-10.md) |
+| 11 | Resilience and configuration reload | [day-11.md](day-11.md) |
 
 Day 10 also produced the [performance report](../performance-report.md).

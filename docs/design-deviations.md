@@ -93,7 +93,23 @@ receives the backend's own response instead of a 503 from the balancer.
 
 ---
 
-## 6. Grafana needs 512 MB, not 256 MB
+## 6. A response timeout was added to the timeouts block
+
+**Section 3.3.** Day 11.
+
+The document's timeouts are connect, read, write and idle. Read and write bound the conversation
+with the client; connect bounds reaching a backend. Nothing bounded how long a backend may take
+to *start answering* once connected.
+
+**What is done instead:** `timeouts.response_timeout` was added, defaulting to the read timeout
+when omitted. Without it a backend that accepts the connection and then stalls holds the request
+until the client-side write timeout kills it, and the failure policy never gets the chance to try
+another backend. With it, a stalled backend is abandoned and the request is retried elsewhere,
+which is what the resilience scenario in section 10.4 asks for.
+
+---
+
+## 7. Grafana needs 512 MB, not 256 MB
 
 **Section 7.6.** Day 8.
 
@@ -108,7 +124,7 @@ specified.
 
 ---
 
-## 7. Load testing used a purpose-built driver above 500 connections
+## 8. Load testing used a purpose-built driver above 500 connections
 
 **Section 10.3.** Day 10.
 
@@ -126,7 +142,7 @@ carries its numbers.
 
 ---
 
-## 8. The latency target needs restating
+## 9. The latency target needs restating
 
 **Section 10.3.** Day 10.
 

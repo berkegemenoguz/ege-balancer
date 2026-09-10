@@ -6,7 +6,7 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 unhealthy backends are taken out of the pool automatically, failures are handled by a policy you
 choose, and the whole system is observable through structured logs and Prometheus metrics.
 
-> Status: day 10 of the 12-day plan. Everything below is implemented and tested, except where
+> Status: day 11 of the 12-day plan. Everything below is implemented and tested, except where
 > the *Not yet built* list says otherwise.
 
 ## Features
@@ -25,12 +25,14 @@ choose, and the whole system is observable through structured logs and Prometheu
   and `X-Forwarded-For` is rewritten so a client cannot forge its own address
 - **Graceful shutdown**: on SIGINT or SIGTERM the balancer stops accepting connections and lets
   the requests already in flight finish
+- **Configuration reload on SIGHUP**: backends, weights, algorithm, failure policy and limits
+  change without dropping a connection; an invalid file is refused and the balancer keeps
+  running on what it had
 - **Observability**: structured JSON logs, Prometheus metrics, a JSON status endpoint, and
   optional profiling endpoints
 
 ### Not yet built
 
-- Config hot-reload on SIGHUP (day 11)
 - A production Docker image and release pipeline (day 12)
 - TLS termination, HTTP/2 and service discovery — out of scope for v1.0
 
@@ -87,6 +89,19 @@ Two configurations ship with the project, both documenting the full schema:
 
 Copy either to `configs/lb.yaml` for local changes; that path is gitignored.
 
+Send `SIGHUP` to reload the file without restarting:
+
+```bash
+kill -HUP $(pgrep -f 'bin/lb')
+```
+
+Backends, weights, the algorithm, the failure policy, health check settings and the limits are
+applied straight away. Settings bound to a socket — `listen_addr`, `metrics_addr`,
+`max_connections`, the timeouts and `enable_pprof` — need a restart; a reload applies everything
+else and logs which settings it left alone. An invalid file is refused in full, and the balancer
+carries on with the configuration it already had. `/status` reports how many reloads have been
+applied.
+
 The numeric values in both are starting points. The [performance report](docs/performance-report.md)
 records what the load test says about them.
 
@@ -98,8 +113,8 @@ port is saturated, and neither path is taken away from the backends.
 
 - `/metrics` — Prometheus format: requests by backend and status, a latency histogram, backend
   failures, rejected requests by reason, and live gauges for active connections and health
-- `/status` — a JSON summary for a person: algorithm, healthy count, and each backend's weight,
-  health and active connections
+- `/status` — a JSON summary for a person: algorithm, healthy count, applied reload count, and
+  each backend's weight, health and active connections
 - `/debug/pprof/` — Go's profiling endpoints, served only when `enable_pprof` is set. They expose
   heap and goroutine state, so they are off by default.
 
