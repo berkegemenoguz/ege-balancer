@@ -80,4 +80,8 @@ The stack, with the balancer running as a container alongside the backends:
 | Prometheus | the compose target `up`, ten health series, `sum(lb_backend_healthy)` exactly 10 |
 | Grafana | the dashboard's query returns live data through its own datasource |
 | Graceful shutdown | `docker compose stop` logs the drain on both servers before exiting |
-| Memory | balancer 18 MiB of its 128 MB limit; Prometheus 42 MiB of 256 MB; Grafana 299 MiB of 512 MB |
+| Memory | balancer 18 MiB of its 128 MB limit; Prometheus 42 MiB of 256 MB; Grafana 299 MiB of the 512 MB it had at the time |
+
+Grafana's limit was revisited afterwards: 512 MB was not enough once the dashboard refreshed
+every five seconds, and the fix was a memory budget rather than a higher ceiling. See
+[design deviations](../design-deviations.md).

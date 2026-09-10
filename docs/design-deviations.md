@@ -159,7 +159,23 @@ carries its numbers.
 
 ---
 
-## 9. The latency target needs restating
+## 9. A demo console was added, outside the document's scope
+
+**Not in the design document.** After v1.0.
+
+`cmd/demo` is a local console that brings the demo stack up and offers the actions one would
+otherwise type: sustained traffic, measuring the distribution, stopping and starting backends,
+switching the algorithm, demonstrating the rate limit, and putting everything back. It exists so
+that a demonstration does not depend on typing long commands correctly under time pressure.
+
+It is a development tool, not part of the product: it shells out to `docker`, writes to the
+configuration file, never listens on a socket, and is excluded from the container image. Every
+action prints the command it runs, so the console stays a shortcut for typing rather than a layer
+that hides what happens.
+
+---
+
+## 10. The latency target needs restating
 
 **Section 10.3.** Day 10.
 
