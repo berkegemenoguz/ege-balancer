@@ -72,6 +72,13 @@ Send it some traffic and watch the distribution:
 for i in $(seq 20); do curl -s localhost:8080; echo; done | sort | uniq -c
 ```
 
+Or drive all of it from one place — the [demo console](cmd/demo/) starts the stack and offers the
+same actions as menu entries, printing the command behind each one:
+
+```bash
+go run ./cmd/demo
+```
+
 Run the tests:
 
 ```bash
@@ -164,6 +171,7 @@ method, the bottlenecks and the before-and-after numbers.
 
 ```
 cmd/lb/                    entry point: reads configuration, builds the logger, runs the app
+cmd/demo/                  local console for driving the demo stack
 internal/app/              wiring, shared by the binary and the integration tests
 internal/config/           configuration parsing, defaults and validation
 internal/balancer/         LBStrategy interface and the three algorithms

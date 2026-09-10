@@ -1,6 +1,7 @@
 .git
 .github
 bin
+cmd/demo
 deploy
 docs
 *.md
