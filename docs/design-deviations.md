@@ -111,18 +111,33 @@ which is what the resilience scenario in section 10.4 asks for.
 
 ---
 
-## 7. Grafana needs 512 MB, not 256 MB
+## 7. Grafana needs a memory budget, not just a bigger limit
 
-**Section 7.6.** Day 8.
+**Section 7.6.** Days 8 and 12.
 
 The document gives both monitoring containers a 256 MB memory limit.
 
-**What is done instead:** Prometheus keeps 256 MB; Grafana was raised to 512 MB.
+**What is done instead:** Prometheus keeps 256 MB. Grafana was given a 1 GB limit and, more
+importantly, a `GOMEMLIMIT` of 768 MiB.
 
 **Why:** Grafana 13 idles inside 256 MB but is killed the moment a dashboard is rendered — the
-container exited with code 137 and `OOMKilled: true` during the first live test. Measured under
-load it sits at 331 MiB. Prometheus uses 143 MiB with ten backends being scraped and stays as
-specified.
+container exited with code 137 and `OOMKilled: true`. Raising the limit to 512 MB was not enough
+either: with a five second refresh and a browser watching, it was killed again.
+
+Measuring showed why. Under continuous load Grafana's memory climbed steadily — 587 MiB at one
+minute, 751 MiB at four, still rising. That is how the Go runtime behaves when it does not know
+it is constrained: it lets the heap grow and collects late, so a higher ceiling only postpones
+the kill. Told its budget through `GOMEMLIMIT`, it collects before reaching the limit: the same
+load plateaued at about 774 MiB and stayed there, with no restart over five minutes.
+
+The remaining 256 MB of the container limit is headroom for what the runtime allocates outside
+the heap.
+
+Prometheus, scraping ten backends every five seconds, uses 143 MiB and keeps its 256 MB as
+specified. The scrape interval in the same stack is 5s rather than the 15s the document suggests,
+and the dashboard refreshes every 5s to match: a dashboard that reacts within a few seconds is
+what makes the monitoring stack useful while watching a change take effect. The production
+guidance stays as written.
 
 ---
 
