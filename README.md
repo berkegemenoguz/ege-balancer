@@ -6,8 +6,8 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 unhealthy backends are taken out of the pool automatically, failures are handled by a policy you
 choose, and the whole system is observable through structured logs and Prometheus metrics.
 
-> Status: day 11 of the 12-day plan. Everything below is implemented and tested, except where
-> the *Not yet built* list says otherwise.
+> Status: day 12 of the 12-day plan — feature complete and released as v1.0.0. Everything below
+> is implemented and tested, except where the *Out of scope for v1.0* list says otherwise.
 
 ## Features
 
@@ -31,10 +31,14 @@ choose, and the whole system is observable through structured logs and Prometheu
 - **Observability**: structured JSON logs, Prometheus metrics, a JSON status endpoint, and
   optional profiling endpoints
 
-### Not yet built
+- **Shipped as a container**: a multi-stage build on a distroless base, running as a non-root
+  user, published on every tag
 
-- A production Docker image and release pipeline (day 12)
-- TLS termination, HTTP/2 and service discovery — out of scope for v1.0
+### Out of scope for v1.0
+
+- TLS termination and HTTP/2 — the balancer speaks plain HTTP
+- Distributed or multi-node balancing, and service discovery
+- Sticky sessions — backends are assumed stateless
 
 ## Requirements
 
@@ -76,6 +80,26 @@ go test -race -cover ./...
 
 That includes `internal/integration`, which starts the balancer on real sockets against mock
 backends and drives it over HTTP. It needs no Docker and runs in CI with everything else.
+
+## Running in Docker
+
+The whole environment, balancer included, comes up together:
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+Or run a published image against your own configuration:
+
+```bash
+docker run --rm -p 8080:8080 -p 8081:8081 \
+  -v "$PWD/configs/lb.yaml:/etc/lb/config.yaml:ro" \
+  ghcr.io/berkegemenoguz/ege-balancer:latest
+```
+
+The image contains the binary and nothing else — no shell, no package manager — and runs as a
+non-root user. Because there is no shell in it, a container healthcheck is not defined; `/status`
+on the metrics port serves that purpose from outside.
 
 ## Configuration
 
@@ -166,6 +190,8 @@ implementation can be replaced without touching the packages that use it.
   profiling exposed, and throughput and latency before and after each fix.
 - [Design deviations](docs/design-deviations.md) — every place the implementation departs from
   the design document, with the reasoning.
+- [Deployment checklist](docs/deployment-checklist.md) — the production readiness criteria and
+  their evidence, plus what to check before a release and before real traffic.
 
 ## Development
 
