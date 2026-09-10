@@ -18,6 +18,7 @@ type Metrics struct {
 	duration   *prometheus.HistogramVec
 	failures   *prometheus.CounterVec
 	rejections *prometheus.CounterVec
+	reloads    *prometheus.CounterVec
 }
 
 // NewMetrics registers the load balancer's own collectors on a private
@@ -44,9 +45,13 @@ func NewMetrics() *Metrics {
 			Name: "lb_rejected_requests_total",
 			Help: "Requests refused by the load balancer itself, by reason.",
 		}, []string{"reason"}),
+		reloads: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lb_config_reloads_total",
+			Help: "Configuration reloads, by whether they were applied or rejected.",
+		}, []string{"result"}),
 	}
 
-	m.registry.MustRegister(m.requests, m.duration, m.failures, m.rejections)
+	m.registry.MustRegister(m.requests, m.duration, m.failures, m.rejections, m.reloads)
 	return m
 }
 
@@ -65,6 +70,12 @@ func (m *Metrics) ObserveBackendFailure(backend string) {
 // instance one over the rate limit or with an unusable body.
 func (m *Metrics) ObserveRejection(reason string) {
 	m.rejections.WithLabelValues(reason).Inc()
+}
+
+// ObserveReload records the outcome of a configuration reload, so that an
+// operator who sent a signal can see whether it took effect.
+func (m *Metrics) ObserveReload(result string) {
+	m.reloads.WithLabelValues(result).Inc()
 }
 
 // Register adds a collector that reports live values at scrape time.
