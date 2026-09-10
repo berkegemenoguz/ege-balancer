@@ -14,6 +14,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/berkegemenoguz/ege-balancer/internal/balancer"
@@ -32,13 +33,21 @@ var errRetryable5xx = errors.New("backend answered 5xx")
 // Core forwards requests to the backends, applying the configured failure
 // policy on the way.
 type Core struct {
+	checker health.Checker
+	metrics *observability.Metrics
+	forward *httputil.ReverseProxy
+
+	// current is replaced wholesale on a reload. A request reads it once and
+	// works from that snapshot, so a reload can never leave one request using
+	// the new backend pool with the old failure policy.
+	current atomic.Pointer[settings]
+}
+
+// settings is everything about forwarding that a reload can change.
+type settings struct {
 	strategy balancer.LBStrategy
 	backends []*balancer.Backend
-	checker  health.Checker
 	breaker  *breaker
-	metrics  *observability.Metrics
-
-	forward *httputil.ReverseProxy
 	// attempts is how many backends a single request may be offered to.
 	attempts   int
 	retryOn5xx bool
@@ -53,20 +62,56 @@ func New(
 	backends []*balancer.Backend,
 	checker health.Checker,
 	metrics *observability.Metrics,
-) http.Handler {
-	core := &Core{
+) *Handler {
+	core := &Core{checker: checker, metrics: metrics}
+	core.current.Store(settingsFor(cfg, strategy, backends))
+	core.forward = core.newReverseProxy(cfg, len(backends))
+
+	limiter := newRateLimiter(cfg.Limits.RateLimitPerIP, metrics)
+	return &Handler{
+		core:    core,
+		limiter: limiter,
+		serve:   limiter.wrap(validateRequest(metrics, core)),
+	}
+}
+
+// Handler is the served chain: rate limiting, request validation, then the
+// proxy core. It is the type a reload is applied to.
+type Handler struct {
+	core    *Core
+	limiter *rateLimiter
+	serve   http.Handler
+}
+
+// ServeHTTP runs a request through the chain.
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.serve.ServeHTTP(w, r)
+}
+
+// Reload applies a new configuration to the running handler. The backend pool
+// is rebuilt from the backends the caller merged, so backends that survive the
+// change keep their counters.
+func (h *Handler) Reload(cfg *config.Config, strategy balancer.LBStrategy, backends []*balancer.Backend) {
+	h.limiter.setRate(cfg.Limits.RateLimitPerIP)
+	h.core.current.Store(settingsFor(cfg, strategy, backends))
+}
+
+// Strategy is the strategy currently in use, so that a reload can keep it when
+// the algorithm has not changed.
+func (h *Handler) Strategy() balancer.LBStrategy {
+	return h.core.current.Load().strategy
+}
+
+// settingsFor snapshots the forwarding settings described by cfg.
+func settingsFor(cfg *config.Config, strategy balancer.LBStrategy, backends []*balancer.Backend) *settings {
+	return &settings{
 		strategy:   strategy,
 		backends:   backends,
-		checker:    checker,
 		breaker:    newBreaker(cfg.FailurePolicy, cfg.CircuitBreaker),
-		metrics:    metrics,
 		attempts:   attemptsFor(cfg),
 		retryOn5xx: cfg.RetryOn5xx,
 		maxBody:    cfg.Limits.MaxRequestBodyBytes,
 	}
-	core.forward = core.newReverseProxy(cfg, len(backends))
-
-	return newRateLimiter(cfg.Limits.RateLimitPerIP, metrics).wrap(validateRequest(metrics, core))
 }
 
 // attemptsFor translates the failure policy into the number of backends a
@@ -94,7 +139,7 @@ func (c *Core) newReverseProxy(cfg *config.Config, backendCount int) *httputil.R
 		Transport:  transport(cfg, backendCount),
 		BufferPool: newBufferPool(),
 		ModifyResponse: func(response *http.Response) error {
-			if c.retryOn5xx && response.StatusCode >= http.StatusInternalServerError {
+			if c.current.Load().retryOn5xx && response.StatusCode >= http.StatusInternalServerError {
 				return errRetryable5xx
 			}
 			return nil
@@ -112,22 +157,26 @@ func (c *Core) newReverseProxy(cfg *config.Config, backendCount int) *httputil.R
 // ServeHTTP offers the request to healthy backends until one serves it or the
 // configured number of attempts runs out.
 func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, err := c.replayableBody(r)
+	// One snapshot for the whole request: a reload part way through must not
+	// change the rules this request is being judged by.
+	active := c.current.Load()
+
+	body, err := c.replayableBody(r, active)
 	if err != nil {
 		c.metrics.ObserveRejection("body_too_large")
 		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
-	tried := make(map[string]bool, c.attempts)
-	for range c.attempts {
-		backend, err := c.strategy.Select(c.available(tried))
+	tried := make(map[string]bool, active.attempts)
+	for range active.attempts {
+		backend, err := active.strategy.Select(c.available(active, tried))
 		if err != nil {
 			break
 		}
 		tried[backend.Addr] = true
 
-		if c.serve(w, r, backend, body) {
+		if c.serve(w, r, active, backend, body) {
 			return
 		}
 	}
@@ -138,7 +187,7 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // serve makes one attempt and reports whether the client was answered.
-func (c *Core) serve(w http.ResponseWriter, r *http.Request, backend *balancer.Backend, body []byte) bool {
+func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, backend *balancer.Backend, body []byte) bool {
 	// The counter is what least connections balances on, so it must cover the
 	// whole request, not just the choice.
 	backend.Acquire()
@@ -155,7 +204,7 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, backend *balancer.B
 
 	if current.err == nil {
 		c.checker.ReportSuccess(backend.Addr)
-		c.breaker.recordSuccess(backend.Addr)
+		active.breaker.recordSuccess(backend.Addr)
 		c.metrics.ObserveRequest(backend.Addr, strconv.Itoa(current.status), took)
 		slog.Debug("request served", "method", r.Method, "path", r.URL.Path,
 			"backend", backend.Addr, "status", current.status, "duration", took)
@@ -163,7 +212,7 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, backend *balancer.B
 	}
 
 	c.checker.ReportFailure(backend.Addr)
-	c.breaker.recordFailure(backend.Addr)
+	active.breaker.recordFailure(backend.Addr)
 	c.metrics.ObserveBackendFailure(backend.Addr)
 	slog.Warn("backend attempt failed", "method", r.Method, "path", r.URL.Path,
 		"backend", backend.Addr, "error", current.err)
@@ -178,16 +227,16 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, backend *balancer.B
 // and every backend can be marked unhealthy at once; refusing all traffic then
 // turns a slow system into a broken one, while trying a backend that may still
 // answer costs one attempt.
-func (c *Core) available(tried map[string]bool) []*balancer.Backend {
-	fit := make([]*balancer.Backend, 0, len(c.backends))
-	untried := make([]*balancer.Backend, 0, len(c.backends))
+func (c *Core) available(active *settings, tried map[string]bool) []*balancer.Backend {
+	fit := make([]*balancer.Backend, 0, len(active.backends))
+	untried := make([]*balancer.Backend, 0, len(active.backends))
 
-	for _, backend := range c.backends {
+	for _, backend := range active.backends {
 		if tried[backend.Addr] {
 			continue
 		}
 		untried = append(untried, backend)
-		if c.checker.IsHealthy(backend.Addr) && c.breaker.allow(backend.Addr) {
+		if c.checker.IsHealthy(backend.Addr) && active.breaker.allow(backend.Addr) {
 			fit = append(fit, backend)
 		}
 	}
@@ -201,23 +250,23 @@ func (c *Core) available(tried map[string]bool) []*balancer.Backend {
 
 // replayableBody buffers the request body when a retry may need to send it
 // again. It returns nil when there is no body to replay.
-func (c *Core) replayableBody(r *http.Request) ([]byte, error) {
+func (c *Core) replayableBody(r *http.Request, active *settings) ([]byte, error) {
 	if r.Body == nil || r.Body == http.NoBody {
 		return nil, nil
 	}
-	if r.ContentLength > c.maxBody {
+	if r.ContentLength > active.maxBody {
 		return nil, errors.New("request body exceeds the configured limit")
 	}
-	if c.attempts == 1 {
+	if active.attempts == 1 {
 		// Without retries the body is streamed straight through.
 		return nil, nil
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, c.maxBody+1))
+	body, err := io.ReadAll(io.LimitReader(r.Body, active.maxBody+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(body)) > c.maxBody {
+	if int64(len(body)) > active.maxBody {
 		return nil, errors.New("request body exceeds the configured limit")
 	}
 	return body, nil
@@ -272,6 +321,10 @@ func transport(cfg *config.Config, backendCount int) http.RoundTripper {
 	// Inbound connections are capped, so at most that many requests can be in
 	// flight upstream; sharing that budget across the pool bounds the idle
 	// connections without throttling reuse.
+	// Abandons a backend that accepts the connection but does not start
+	// answering, so the failure policy can move the request elsewhere.
+	base.ResponseHeaderTimeout = time.Duration(cfg.Timeouts.ResponseTimeout)
+
 	base.MaxIdleConns = cfg.Limits.MaxConnections
 	base.MaxIdleConnsPerHost = idleConnsPerBackend(cfg.Limits.MaxConnections, backendCount)
 	base.IdleConnTimeout = time.Duration(cfg.Timeouts.IdleTimeout)

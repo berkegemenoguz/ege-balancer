@@ -20,14 +20,14 @@ const sweepThreshold = 10000
 // rateLimiter caps how many requests a single client address may send per
 // second, using one token bucket per address. A limit of zero disables it.
 type rateLimiter struct {
-	// perSecond is both the refill rate and the burst size, so a client may
-	// spend a full second of requests at once and then refills steadily.
-	perSecond float64
-
 	metrics *observability.Metrics
 
-	mu      sync.Mutex
-	buckets map[string]*bucket
+	mu sync.Mutex
+	// perSecond is both the refill rate and the burst size, so a client may
+	// spend a full second of requests at once and then refills steadily. It is
+	// guarded because a reload can change it while requests are in flight.
+	perSecond float64
+	buckets   map[string]*bucket
 }
 
 // bucket is the token bucket of one client address.
@@ -45,12 +45,16 @@ func newRateLimiter(perSecond int, metrics *observability.Metrics) *rateLimiter 
 	}
 }
 
+// setRate applies a new limit, keeping the buckets of the clients already being
+// tracked. A limit of zero disables limiting.
+func (l *rateLimiter) setRate(perSecond int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.perSecond = float64(perSecond)
+}
+
 // wrap rejects requests from clients over their rate before they reach next.
 func (l *rateLimiter) wrap(next http.Handler) http.Handler {
-	if l.perSecond <= 0 {
-		return next
-	}
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if client := clientAddr(r); !l.allow(client, time.Now()) {
 			slog.Info("client over the rate limit", "client", client, "path", r.URL.Path)
@@ -68,6 +72,10 @@ func (l *rateLimiter) wrap(next http.Handler) http.Handler {
 func (l *rateLimiter) allow(addr string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if l.perSecond <= 0 {
+		return true
+	}
 
 	tracked, known := l.buckets[addr]
 	if !known {
