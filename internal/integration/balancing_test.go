@@ -65,6 +65,8 @@ func TestLeastConnectionsAvoidsTheSlowBackend(t *testing.T) {
 
 	slow := backends[0].hits.Load()
 	fast := backends[1].hits.Load() + backends[2].hits.Load()
+	t.Logf("of %d concurrent requests the slow backend served %d and the two fast ones %d",
+		requests, slow, fast)
 
 	if slow == 0 {
 		t.Error("the slow backend received nothing, want it kept in rotation")
