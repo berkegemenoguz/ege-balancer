@@ -63,6 +63,18 @@ services:
     mem_limit: 32m
     ports: ["5690:5678"]
 
+  loadbalancer:
+    build:
+      context: ..
+      args:
+        VERSION: dev
+    ports: ["8080:8080", "8081:8081"]
+    volumes: ["../configs/lb.example.yaml:/etc/lb/config.yaml:ro"]
+    depends_on: [backend-1, backend-2]
+    mem_limit: 128m
+    # The image carries no shell, so there is nothing to run a container
+    # healthcheck with; /status on port 8081 serves that purpose from outside.
+
   prometheus:
     image: prom/prometheus
     volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml"]
