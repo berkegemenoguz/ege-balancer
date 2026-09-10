@@ -68,9 +68,29 @@ func New(algorithm config.Algorithm) (LBStrategy, error) {
 // BackendsFromConfig converts the configured backends into the pool the
 // strategies operate on.
 func BackendsFromConfig(configured []config.Backend) []*Backend {
+	return MergeBackends(nil, configured)
+}
+
+// MergeBackends builds the pool for a new configuration, reusing the existing
+// Backend for any address that survives the change.
+//
+// Reuse matters on a reload: the connection counters live on these objects, so
+// replacing a backend that is still serving would lose track of the requests in
+// flight and mislead least connections until they finished.
+func MergeBackends(existing []*Backend, configured []config.Backend) []*Backend {
+	known := make(map[string]*Backend, len(existing))
+	for _, backend := range existing {
+		known[backend.Addr] = backend
+	}
+
 	backends := make([]*Backend, 0, len(configured))
-	for _, backend := range configured {
-		backends = append(backends, &Backend{Addr: backend.Addr, Weight: backend.Weight})
+	for _, wanted := range configured {
+		if backend, kept := known[wanted.Addr]; kept {
+			backend.Weight = wanted.Weight
+			backends = append(backends, backend)
+			continue
+		}
+		backends = append(backends, &Backend{Addr: wanted.Addr, Weight: wanted.Weight})
 	}
 	return backends
 }
