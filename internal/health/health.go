@@ -23,6 +23,9 @@ import (
 type Checker interface {
 	// Start begins probing the given backends until ctx is cancelled.
 	Start(ctx context.Context, backends []*balancer.Backend)
+	// Reload switches to a new set of backends and check settings, keeping what
+	// is already known about the backends that survive the change.
+	Reload(ctx context.Context, cfg config.HealthCheck, backends []*balancer.Backend)
 	// IsHealthy reports whether the backend at addr may receive traffic.
 	IsHealthy(addr string) bool
 	// ReportSuccess records that a request to addr was served.
@@ -42,13 +45,15 @@ type state struct {
 
 // HTTPChecker probes backends over HTTP and tracks their health.
 type HTTPChecker struct {
-	cfg    config.HealthCheck
-	client *http.Client
-
 	// Health is read on every request and written only when a backend changes
-	// state, so reads must not contend with each other.
+	// state, so reads must not contend with each other. The settings are under
+	// the same lock because a reload replaces them.
 	mu       sync.RWMutex
+	cfg      config.HealthCheck
+	client   *http.Client
 	backends map[string]*state
+	// stopProbes ends the probe goroutines of the previous configuration.
+	stopProbes context.CancelFunc
 }
 
 // New returns a checker that probes cfg.Path on every backend.
@@ -64,15 +69,44 @@ func New(cfg config.HealthCheck) *HTTPChecker {
 // schedule until ctx is cancelled. Backends begin healthy so that traffic flows
 // before the first probe completes.
 func (c *HTTPChecker) Start(ctx context.Context, backends []*balancer.Backend) {
+	c.Reload(ctx, c.settings(), backends)
+}
+
+// Reload switches to a new backend set and new check settings. Backends that
+// survive the change keep their health and their streak; backends that are gone
+// are forgotten, and new ones start healthy like any other.
+func (c *HTTPChecker) Reload(ctx context.Context, cfg config.HealthCheck, backends []*balancer.Backend) {
+	probeCtx, stopProbes := context.WithCancel(ctx)
+
 	c.mu.Lock()
-	for _, backend := range backends {
-		c.backends[backend.Addr] = &state{healthy: true}
+	if c.stopProbes != nil {
+		c.stopProbes()
 	}
+	c.stopProbes = stopProbes
+	c.cfg = cfg
+	c.client = &http.Client{Timeout: time.Duration(cfg.Timeout)}
+
+	kept := make(map[string]*state, len(backends))
+	for _, backend := range backends {
+		if known, survives := c.backends[backend.Addr]; survives {
+			kept[backend.Addr] = known
+			continue
+		}
+		kept[backend.Addr] = &state{healthy: true}
+	}
+	c.backends = kept
 	c.mu.Unlock()
 
 	for _, backend := range backends {
-		go c.probeUntilDone(ctx, backend.Addr)
+		go c.probeUntilDone(probeCtx, backend.Addr)
 	}
+}
+
+// settings returns the current health check configuration.
+func (c *HTTPChecker) settings() config.HealthCheck {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg
 }
 
 // IsHealthy reports whether addr may receive traffic. An address the checker
@@ -98,7 +132,7 @@ func (c *HTTPChecker) ReportFailure(addr string) {
 
 // probeUntilDone probes addr immediately and then once per interval.
 func (c *HTTPChecker) probeUntilDone(ctx context.Context, addr string) {
-	ticker := time.NewTicker(time.Duration(c.cfg.Interval))
+	ticker := time.NewTicker(time.Duration(c.settings().Interval))
 	defer ticker.Stop()
 
 	for {
@@ -114,7 +148,9 @@ func (c *HTTPChecker) probeUntilDone(ctx context.Context, addr string) {
 
 // probe performs one active check and records its outcome.
 func (c *HTTPChecker) probe(ctx context.Context, addr string) {
-	url := "http://" + addr + c.cfg.Path
+	c.mu.RLock()
+	url, client := "http://"+addr+c.cfg.Path, c.client
+	c.mu.RUnlock()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -122,7 +158,7 @@ func (c *HTTPChecker) probe(ctx context.Context, addr string) {
 		return
 	}
 
-	response, err := c.client.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		c.record(addr, false)
 		return
