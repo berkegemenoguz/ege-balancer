@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -31,7 +32,7 @@ func run(configPath string) error {
 	}
 	observability.NewLogger(cfg.Logging)
 
-	balancer, err := app.New(cfg)
+	balancer, err := app.New(cfg, configPath)
 	if err != nil {
 		return err
 	}
@@ -39,5 +40,32 @@ func run(configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	return balancer.Run(ctx)
+	return balancer.Run(ctx, reloadOn(ctx, syscall.SIGHUP))
+}
+
+// reloadOn turns the given signals into reload requests for as long as ctx
+// lives. SIGHUP is the conventional "re-read your configuration" signal.
+func reloadOn(ctx context.Context, signals ...os.Signal) <-chan struct{} {
+	received := make(chan os.Signal, 1)
+	signal.Notify(received, signals...)
+
+	requests := make(chan struct{}, 1)
+	go func() {
+		defer signal.Stop(received)
+		defer close(requests)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-received:
+				select {
+				case requests <- struct{}{}:
+				default:
+					// A reload is already queued; one is enough.
+				}
+			}
+		}
+	}()
+	return requests
 }
