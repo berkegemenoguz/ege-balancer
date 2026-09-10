@@ -5,7 +5,9 @@ implementation departs from it, the reason is recorded here, so that the documen
 back in step deliberately rather than by accident.
 
 Each entry names the section of the design document it touches and the day it was decided; the
-[development log](development-log/) page for that day has the surrounding detail.
+[development log](development-log/) page for that day has the surrounding detail. The
+[revision notes](technical-design/) turn these entries into the concrete edits the document needs,
+in Turkish and English.
 
 ---
 

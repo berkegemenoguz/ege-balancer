@@ -16,7 +16,7 @@ first section follows the production readiness criteria in section 11 of the des
 | Multi-stage, small, non-root image; CI running lint, test and build | met | `Dockerfile` on distroless nonroot; `.github/workflows/ci.yml` and `release.yml` |
 | Security measures from section 6.3 applied | met | rate limiting, connection and body limits, framing validation, forwarded-header rewriting, govulncheck in CI, non-root image |
 | Protected `main`, every change through PR and CI, v1.0.0 tagged | partly | CI gates every push; the branch and pull request flow is not used, see [deviation 1](design-deviations.md) |
-| README, architecture diagrams and configuration reference complete | met | README, [development log](development-log/), [design deviations](design-deviations.md) |
+| README, architecture diagrams and configuration reference complete | met | README, [development log](development-log/), [design deviations](design-deviations.md), [technical design](technical-design/) |
 
 ## Before tagging a release
 
