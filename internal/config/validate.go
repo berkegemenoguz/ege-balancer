@@ -49,6 +49,12 @@ func (c *Config) validate() error {
 	if c.FailurePolicy == RetryNextBackend && c.Retry.MaxRetries == 0 {
 		add("retry.max_retries must be at least 1 when failure_policy is %s", RetryNextBackend)
 	}
+	if c.Retry.BudgetPercent <= 0 || c.Retry.BudgetPercent > 100 {
+		add("retry.budget_percent must be greater than 0 and at most 100")
+	}
+	if c.Retry.MinRetryConcurrency < 1 {
+		add("retry.min_retry_concurrency must be at least 1")
+	}
 
 	if c.FailurePolicy == CircuitBreakerPolicy {
 		if c.CircuitBreaker.FailureThreshold < 1 {

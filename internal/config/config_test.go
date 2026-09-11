@@ -129,6 +129,12 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.Logging.Format != FormatJSON {
 		t.Errorf("omitted logging.format = %q, want the default %q", cfg.Logging.Format, FormatJSON)
 	}
+	if cfg.Retry.BudgetPercent != 20 {
+		t.Errorf("omitted retry.budget_percent = %v, want the default 20", cfg.Retry.BudgetPercent)
+	}
+	if cfg.Retry.MinRetryConcurrency != 3 {
+		t.Errorf("omitted retry.min_retry_concurrency = %d, want the default 3", cfg.Retry.MinRetryConcurrency)
+	}
 }
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
@@ -144,6 +150,9 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"unknown failure policy", "failure_policy:", "failure_policy: explode", `failure_policy "explode" is unknown`},
 		{"negative retries", "  max_retries:", "  max_retries: -1", "must not be negative"},
 		{"retry policy without retries", "  max_retries:", "  max_retries: 0", "must be at least 1 when failure_policy"},
+		{"retry budget above everything", "  max_retries:", "  max_retries: 2\n  budget_percent: 150", "budget_percent must be greater than 0 and at most 100"},
+		{"negative retry budget", "  max_retries:", "  max_retries: 2\n  budget_percent: -5", "budget_percent must be greater than 0 and at most 100"},
+		{"negative retry minimum", "  max_retries:", "  max_retries: 2\n  min_retry_concurrency: -1", "min_retry_concurrency must be at least 1"},
 		{"backend without port", "  - addr:", `  - addr: "backend-1"`, "not a host:port"},
 		{"negative weight", "    weight:", "    weight: -2", "weight must not be negative"},
 		{"health path without slash", "  path:", `  path: "healthz"`, "must start with a slash"},

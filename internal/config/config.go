@@ -74,9 +74,16 @@ type Config struct {
 	Logging        Logging        `yaml:"logging"`
 }
 
-// Retry bounds how often a single request may be forwarded again.
+// Retry bounds how often a single request may be forwarded again, and how many
+// retries the whole balancer may have in flight at once.
 type Retry struct {
 	MaxRetries int `yaml:"max_retries"`
+	// BudgetPercent caps the retries in flight at this share of the requests in
+	// flight, so that retries cannot multiply the load on a failing pool.
+	BudgetPercent float64 `yaml:"budget_percent"`
+	// MinRetryConcurrency is the number of retries always allowed in flight,
+	// whatever the load, so that light traffic can still be retried.
+	MinRetryConcurrency int `yaml:"min_retry_concurrency"`
 }
 
 // CircuitBreaker describes when a backend is tripped out of the pool and for
@@ -161,6 +168,14 @@ func Load(path string) (*Config, error) {
 func (c *Config) applyDefaults() {
 	if c.MetricsAddr == "" {
 		c.MetricsAddr = ":8081"
+	}
+	// The retry budget defaults are Envoy's: retries may add a fifth to the
+	// load, and three may always be in flight.
+	if c.Retry.BudgetPercent == 0 {
+		c.Retry.BudgetPercent = 20
+	}
+	if c.Retry.MinRetryConcurrency == 0 {
+		c.Retry.MinRetryConcurrency = 3
 	}
 	if c.Timeouts.ResponseTimeout == 0 {
 		c.Timeouts.ResponseTimeout = c.Timeouts.ReadTimeout
