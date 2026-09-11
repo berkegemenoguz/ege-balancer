@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -121,4 +122,41 @@ func TestSweepDropsIdleClients(t *testing.T) {
 	if len(limiter.buckets) != 0 {
 		t.Errorf("%d buckets left after the sweep, want none", len(limiter.buckets))
 	}
+}
+
+// BenchmarkRateLimiterAllow is the check every request passes through when a
+// limit is configured. The limit is high enough never to refuse, so the cost
+// measured is the bookkeeping alone.
+func BenchmarkRateLimiterAllow(b *testing.B) {
+	limiter := newRateLimiter(1_000_000, testMetrics())
+	now := time.Now()
+	b.ReportAllocs()
+
+	for b.Loop() {
+		limiter.allow("203.0.113.7", now)
+	}
+}
+
+// BenchmarkRateLimiterAllowManyClients spreads the checks over many addresses
+// from many goroutines, which is the contention the limiter's single lock sees
+// in production.
+func BenchmarkRateLimiterAllowManyClients(b *testing.B) {
+	limiter := newRateLimiter(1_000_000, testMetrics())
+	now := time.Now()
+
+	// Named up front, so that the benchmark measures the limiter rather than
+	// the string building that names each client.
+	clients := make([]string, 250)
+	for i := range clients {
+		clients[i] = "203.0.113." + strconv.Itoa(i)
+	}
+	b.ReportAllocs()
+
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			limiter.allow(clients[i%len(clients)], now)
+			i++
+		}
+	})
 }
