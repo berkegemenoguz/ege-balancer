@@ -46,6 +46,8 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
       backend is abandoned and retried rather than killing the client's request
 - [ ] `failure_policy` matches the priority: `retry_next_backend` for availability, `fail_fast`
       for latency, `circuit_breaker` to protect a struggling backend
+- [ ] Under `retry_next_backend`, `retry.budget_percent` is the extra load the backends can take
+      when they start failing, and `retry.min_retry_concurrency` covers the quietest traffic
 - [ ] `enable_pprof` is false, or the metrics port is unreachable from outside
 - [ ] The metrics port is not exposed publicly
 - [ ] Prometheus is scraping the balancer and the Grafana dashboard shows data
@@ -56,6 +58,8 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
 - [ ] `lb_requests_total` grows across all backends in the expected proportion
 - [ ] `lb_rejected_requests_total` is flat; a rising `rate_limited` or `no_healthy_backend` means
       the limits or the health thresholds need revisiting
+- [ ] `retry_budget_exhausted` appears only while backends are failing; the budget is doing its
+      job then, and the backends are what needs attention
 - [ ] p99 latency is within the target under real traffic
 - [ ] A rolling restart of one backend causes no client-visible errors
 
