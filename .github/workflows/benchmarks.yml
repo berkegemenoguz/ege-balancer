@@ -1,0 +1,48 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+
+      # Shared runners are too noisy to fail a build on timings, so this job
+      # reports and never gates. The guards that do gate — upstream connection
+      # reuse and bytes allocated per request — are ordinary tests, and run in
+      # the CI workflow with everything else.
+      - name: Run the benchmarks
+        shell: bash
+        run: go test -run '^$' -bench . -benchmem -count=6 -benchtime=500ms ./... | tee benchmarks.txt
+
+      - name: Summarise
+        shell: bash
+        run: |
+          {
+            echo "## Benchmarks"
+            echo
+            echo "Six runs of each, summarised by benchstat. Timings on a shared runner vary"
+            echo "between runs; bytes and allocations per operation do not."
+            echo
+            echo '```'
+            benchstat benchmarks.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks
+          path: benchmarks.txt
