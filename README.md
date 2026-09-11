@@ -199,9 +199,9 @@ implementation can be replaced without touching the packages that use it.
 
 ## Documentation
 
-- [Technical design](docs/technical-design/) — the design document the project was built to
-  (architecture rationale, the twelve day plan, the production readiness criteria), and the notes
-  for revising it now that the plan is finished, in Turkish and English.
+- [Technical design](docs/technical-design/) — the design as a paper, in English and Turkish:
+  architecture, algorithms, failure handling and the evaluation. The original design the project
+  was built to and its revision notes are kept beside it.
 - [Development log](docs/development-log/) — one page per day, and one for the work after the
   release: what was built, which decisions were taken and why, what went wrong, and how the result
   was verified.
