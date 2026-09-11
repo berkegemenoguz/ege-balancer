@@ -182,11 +182,14 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		tried[backend.Addr] = true
 
 		retry := n > 0
-		if retry && !active.budget.tryRetry() {
-			slog.Warn("retry budget exhausted, not retrying", "method", r.Method, "path", r.URL.Path)
-			c.metrics.ObserveRejection("retry_budget_exhausted")
-			unavailable(w)
-			return
+		if retry {
+			if !active.budget.tryRetry() {
+				slog.Warn("retry budget exhausted, not retrying", "method", r.Method, "path", r.URL.Path)
+				c.metrics.ObserveRejection("retry_budget_exhausted")
+				unavailable(w)
+				return
+			}
+			c.metrics.ObserveRetry()
 		}
 
 		served := c.serve(w, r, active, backend, body)
