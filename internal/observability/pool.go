@@ -120,7 +120,7 @@ func (p *Pool) StatusHandler() http.Handler {
 			}
 			current.Backends = append(current.Backends, backendStatus{
 				Addr:              backend.Addr,
-				Weight:            backend.Weight,
+				Weight:            backend.Weight(),
 				Healthy:           healthy,
 				ActiveConnections: backend.ActiveConnections(),
 			})

@@ -19,11 +19,29 @@ var ErrNoBackends = errors.New("no backend available")
 // shared by every connection goroutine, so it is always held by pointer and its
 // mutable state is accessed atomically.
 type Backend struct {
-	Addr   string
-	Weight int
+	Addr string
 
+	// weight is changed by a reload while requests are being balanced on it.
+	weight atomic.Int64
 	// active counts the requests currently being served by this backend.
 	active atomic.Int64
+}
+
+// NewBackend returns a backend at addr with the given weight.
+func NewBackend(addr string, weight int) *Backend {
+	backend := &Backend{Addr: addr}
+	backend.SetWeight(weight)
+	return backend
+}
+
+// Weight is the backend's share under weighted round robin.
+func (b *Backend) Weight() int {
+	return int(b.weight.Load())
+}
+
+// SetWeight changes the backend's share, safely while it is being balanced on.
+func (b *Backend) SetWeight(weight int) {
+	b.weight.Store(int64(weight))
 }
 
 // Acquire records that a request has been handed to the backend.
@@ -86,11 +104,11 @@ func MergeBackends(existing []*Backend, configured []config.Backend) []*Backend 
 	backends := make([]*Backend, 0, len(configured))
 	for _, wanted := range configured {
 		if backend, kept := known[wanted.Addr]; kept {
-			backend.Weight = wanted.Weight
+			backend.SetWeight(wanted.Weight)
 			backends = append(backends, backend)
 			continue
 		}
-		backends = append(backends, &Backend{Addr: wanted.Addr, Weight: wanted.Weight})
+		backends = append(backends, NewBackend(wanted.Addr, wanted.Weight))
 	}
 	return backends
 }

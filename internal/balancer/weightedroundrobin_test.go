@@ -11,7 +11,7 @@ import (
 func weighted(weights ...int) []*Backend {
 	backends := make([]*Backend, 0, len(weights))
 	for i, weight := range weights {
-		backends = append(backends, &Backend{Addr: string(rune('a' + i)), Weight: weight})
+		backends = append(backends, NewBackend(string(rune('a'+i)), weight))
 	}
 	return backends
 }
@@ -69,7 +69,7 @@ func TestWeightedRoundRobinMatchesTheConfiguredRatio(t *testing.T) {
 
 	// Weights 1, 2 and 3 out of a total of 6 mean 200, 400 and 600 requests.
 	for _, backend := range backends {
-		want := requests * backend.Weight / 6
+		want := requests * backend.Weight() / 6
 		if got := served[backend.Addr]; got != want {
 			t.Errorf("%s served %d requests, want exactly %d", backend.Addr, got, want)
 		}
@@ -166,7 +166,7 @@ func TestWeightedRoundRobinIsConcurrencySafe(t *testing.T) {
 
 	requests := goroutines * requestsPerRoutine
 	for _, backend := range backends {
-		if got, want := total[backend.Addr], requests*backend.Weight/6; got != want {
+		if got, want := total[backend.Addr], requests*backend.Weight()/6; got != want {
 			t.Errorf("%s served %d requests, want exactly %d", backend.Addr, got, want)
 		}
 	}

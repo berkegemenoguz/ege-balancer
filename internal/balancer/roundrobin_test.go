@@ -9,7 +9,7 @@ import (
 func pool(n int) []*Backend {
 	backends := make([]*Backend, 0, n)
 	for i := range n {
-		backends = append(backends, &Backend{Addr: string(rune('a'+i)) + ":5678", Weight: 1})
+		backends = append(backends, NewBackend(string(rune('a'+i))+":5678", 1))
 	}
 	return backends
 }

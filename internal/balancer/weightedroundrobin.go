@@ -43,7 +43,7 @@ func (w *WeightedRoundRobin) Select(backends []*Backend) (*Backend, error) {
 		totalWeight int
 	)
 	for _, backend := range backends {
-		weight := backend.Weight
+		weight := backend.Weight()
 		if weight < 1 {
 			// Configuration defaults an omitted weight to 1; guard against a
 			// pool built by hand so that a zero weight cannot starve selection.

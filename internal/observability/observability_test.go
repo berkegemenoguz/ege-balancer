@@ -74,8 +74,8 @@ func TestMetricsReportFailuresAndRejections(t *testing.T) {
 
 func TestPoolReportsLiveStateAtScrapeTime(t *testing.T) {
 	backends := []*balancer.Backend{
-		{Addr: "backend-1:5678", Weight: 1},
-		{Addr: "backend-2:5678", Weight: 3},
+		balancer.NewBackend("backend-1:5678", 1),
+		balancer.NewBackend("backend-2:5678", 3),
 	}
 	backends[0].Acquire()
 	backends[0].Acquire()
@@ -108,8 +108,8 @@ func TestPoolReportsLiveStateAtScrapeTime(t *testing.T) {
 
 func TestStatusReportsThePool(t *testing.T) {
 	backends := []*balancer.Backend{
-		{Addr: "backend-1:5678", Weight: 1},
-		{Addr: "backend-2:5678", Weight: 3},
+		balancer.NewBackend("backend-1:5678", 1),
+		balancer.NewBackend("backend-2:5678", 3),
 	}
 	backends[1].Acquire()
 
@@ -208,13 +208,13 @@ func TestPprofIsServedOnlyWhenEnabled(t *testing.T) {
 }
 
 func TestPoolReloadFollowsTheNewBackends(t *testing.T) {
-	first := []*balancer.Backend{{Addr: "backend-1:5678", Weight: 1}}
+	first := []*balancer.Backend{balancer.NewBackend("backend-1:5678", 1)}
 	pool := NewPool("round_robin", first, stubChecker{})
 
 	metrics := NewMetrics()
 	metrics.Register(pool)
 
-	pool.Reload("least_connections", []*balancer.Backend{{Addr: "backend-2:5678", Weight: 2}})
+	pool.Reload("least_connections", []*balancer.Backend{balancer.NewBackend("backend-2:5678", 2)})
 
 	body := scrape(t, metrics.Handler())
 	if strings.Contains(body, `backend="backend-1:5678"`) {

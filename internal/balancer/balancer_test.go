@@ -3,6 +3,7 @@ package balancer
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/berkegemenoguz/ege-balancer/internal/config"
@@ -43,9 +44,9 @@ func TestBackendsFromConfig(t *testing.T) {
 	if got, want := len(backends), 2; got != want {
 		t.Fatalf("len = %d, want %d", got, want)
 	}
-	if backends[1].Addr != "backend-2:5678" || backends[1].Weight != 3 {
+	if backends[1].Addr != "backend-2:5678" || backends[1].Weight() != 3 {
 		t.Errorf("backends[1] = %s weight %d, want backend-2:5678 weight 3",
-			backends[1].Addr, backends[1].Weight)
+			backends[1].Addr, backends[1].Weight())
 	}
 }
 
@@ -81,10 +82,29 @@ func TestMergeBackendsKeepsTheBackendsThatSurvive(t *testing.T) {
 	if got := merged[0].ActiveConnections(); got != 2 {
 		t.Errorf("active connections = %d, want the 2 in flight to be kept", got)
 	}
-	if merged[0].Weight != 5 {
-		t.Errorf("weight = %d, want the reconfigured 5", merged[0].Weight)
+	if merged[0].Weight() != 5 {
+		t.Errorf("weight = %d, want the reconfigured 5", merged[0].Weight())
 	}
 	if merged[1].Addr != "backend-3:5678" {
 		t.Errorf("merged[1] = %s, want the newly added backend", merged[1].Addr)
 	}
+}
+
+// A reload changes the weight of a backend that survives it while requests are
+// still being balanced on that backend. Run under -race, this fails if the
+// weight is written without synchronisation.
+func TestMergeBackendsIsSafeWhileTheWeightIsRead(t *testing.T) {
+	existing := BackendsFromConfig([]config.Backend{{Addr: "backend-1:5678", Weight: 1}})
+	strategy := NewWeightedRoundRobin()
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 1000 {
+			_, _ = strategy.Select(existing)
+		}
+	})
+	for weight := range 1000 {
+		MergeBackends(existing, []config.Backend{{Addr: "backend-1:5678", Weight: weight%5 + 1}})
+	}
+	wg.Wait()
 }
