@@ -76,3 +76,29 @@ func TestRetryBudgetHoldsUnderConcurrency(t *testing.T) {
 		t.Errorf("200 concurrent retries were allowed %d times, want exactly 20", got)
 	}
 }
+
+func BenchmarkRetryBudget(b *testing.B) {
+	budget := newRetryBudget(config.Retry{BudgetPercent: 20, MinRetryConcurrency: 3})
+	for b.Loop() {
+		budget.requestStarted()
+		if budget.tryRetry() {
+			budget.retryFinished()
+		}
+		budget.requestFinished()
+	}
+}
+
+// BenchmarkRetryBudgetParallel is the cost every request pays: the budget is
+// shared by the whole balancer, so its counters are contended.
+func BenchmarkRetryBudgetParallel(b *testing.B) {
+	budget := newRetryBudget(config.Retry{BudgetPercent: 20, MinRetryConcurrency: 3})
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			budget.requestStarted()
+			if budget.tryRetry() {
+				budget.retryFinished()
+			}
+			budget.requestFinished()
+		}
+	})
+}
