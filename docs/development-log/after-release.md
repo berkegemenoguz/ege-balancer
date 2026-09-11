@@ -66,3 +66,68 @@ Each guard was checked by reintroducing the bug it guards against:
 
 The workflow passed actionlint, and both of its summaries — with a baseline and without one —
 were produced locally from real benchmark output before it was pushed.
+
+## Retry budget
+
+**Why.** Under `retry_next_backend` every request may be retried `max_retries` times. When the
+pool starts failing, that multiplies the traffic reaching it by up to `1 + max_retries` — at the
+moment it can least absorb it. `max_retries` bounds one request; nothing bounded all of them.
+
+### What was built
+
+- `retry.budget_percent` and `retry.min_retry_concurrency`: retries in flight may be at most that
+  share of the requests in flight, and never fewer than the minimum. The defaults are 20% and 3.
+- A retry the budget refuses is not sent: the client gets 503 with `Retry-After`, and the refusal
+  is counted as `lb_rejected_requests_total{reason="retry_budget_exhausted"}`.
+- `lb_retries_total`, the retries actually sent, and a Retries panel on the dashboard showing both.
+
+### Decisions
+
+**Envoy's model rather than a token bucket.** Finagle's budget deposits tokens per request and
+spends one per retry, over a time window. Envoy compares retries in flight with requests in
+flight. The second has no window or refill rate to tune, follows the load at every moment, and
+takes two counters and no lock.
+
+**On by default.** A configuration that says nothing about the budget gets one. With the minimum
+of three, light traffic retries exactly as before; the budget only acts when many requests fail
+at once, which is the case it exists for.
+
+**The minimum is at least one.** Zero in the file means "use the default", as it does for a
+backend's weight. A minimum of zero would also mean that at low traffic — where 20% of the load
+rounds down to nothing — no request could ever be retried.
+
+**A refusal is a rejection, not a second metric.** The client receives a 503 from the balancer
+itself, which is what `lb_rejected_requests_total` counts. `lb_retries_total` counts only the
+retries sent, so the two together give the refusal rate without counting any event twice.
+
+**The budget belongs to the configuration snapshot.** A reload builds a new, empty one. Requests
+in flight keep the budget they started with, so no counter is ever decremented on the wrong one.
+
+### What went wrong
+
+**Hand-built configurations skip the defaults.** The proxy's unit tests build `config.Config`
+directly rather than loading a file, so the budget came out as zero and would have refused every
+retry. Their shared fixture now carries the defaults. The integration tests were unaffected: they
+write the configuration to a file and load it the way the binary does.
+
+**CI found a data race from day 11.** The push carrying the budget failed in
+`TestReloadKeepsUnchangeableSettings` with a race the change had not caused. On a reload,
+`MergeBackends` wrote a surviving backend's weight as a plain field while `/status` — and, under
+real traffic, weighted round robin — read it. The test polls `/status` while a reload is applied,
+and on this run the two met. The weight is now atomic and reached only through `Weight` and
+`SetWeight`, so an unsynchronised write no longer compiles; a new test changes weights while a
+strategy selects, and fails under `-race` with the plain field restored. It is the second
+race from the plan's days that only CI found, after the health probe racing a day 9 test.
+
+### Verification
+
+Four backends that all fail slowly, fifty concurrent requests, up to three retries each:
+
+| Budget | Attempts reaching the backends |
+| --- | --- |
+| The whole load | exactly 200 — every request tried four times; `lb_retries_total` 150 |
+| The default 20% | 62 in each of 10 runs, and in each of 20 runs on two CPUs |
+
+The proxy test for a spent budget fails when the budget check is removed. The budget costs
+3.5 ns alone and 144 ns with ten goroutines contending for it — about 1% of forwarding a request
+in parallel — and forwarding itself is unchanged at 104 allocations and about 13 KB.
