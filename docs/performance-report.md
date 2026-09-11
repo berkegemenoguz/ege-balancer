@@ -124,3 +124,49 @@ rather than as a single number.
 The remaining CPU profile is still dominated by syscalls, which for a proxy that mostly moves
 bytes between sockets is the expected shape. There is no hot spot left in the balancer's own
 code to optimise; further gains would come from the operating system and the network stack.
+
+## Keeping the fixes
+
+The load test above needs the whole environment and a quiet machine, so it cannot run on every
+change. After the release, the two fixes that a harmless looking edit could undo were each given
+a test that runs with the ordinary suite, and the hot paths were given benchmarks.
+
+**Guards.** Both run in CI under `go test ./...` and fail the build.
+
+| Test | What it measures | Healthy | With the fix reverted |
+| --- | --- | --- | --- |
+| `TestUpstreamConnectionsAreReused` (`internal/proxy/transport_test.go`) | backend connections opened by 5 rounds of 24 concurrent requests; the limit is 48 | 24 | 112 with two idle connections per host, fails |
+| `TestForwardingAllocatesLessThanACopyBuffer` (`internal/proxy/budget_test.go`) | bytes allocated per forwarded request; the limit is one 32 KB copy buffer | about 13 KB | about 46 KB without the buffer pool, fails |
+
+Both were checked by reintroducing the original bug and watching them fail. The second test gates
+on bytes rather than on the number of allocations, because the count is 104 either way: the
+missing pool changes the size of one allocation, not how many there are.
+
+**Benchmarks.** One run on the machine described under Method:
+
+| Benchmark | Time per operation | Allocations |
+| --- | --- | --- |
+| Round robin, 10 and 100 backends | 1.9 ns, 1.8 ns | none |
+| Least connections, 10 and 100 backends | 4.2 ns, 44 ns | none |
+| Weighted round robin, 10 and 100 backends | 177 ns, 1.95 µs | none |
+| Round robin, least connections, weighted round robin, 10 goroutines | 36 ns, 1.2 ns, 274 ns | none |
+| Health lookup, alone and alongside reports | 7.6 ns, 35 ns | none |
+| Rate limiter, one client and many clients | 12 ns, 102 ns | none |
+| Forwarding one request, sequential and parallel | 32 µs, 11 µs | 13 KB, 104 |
+
+What they show:
+
+- Selection is cheap next to forwarding. The slowest case, weighted round robin over a hundred
+  backends, is about 6% of the cost of forwarding one request; over ten backends it is under 1%.
+- Weighted round robin and least connections both grow linearly with the pool, since each visits
+  every backend to choose one. Round robin does not.
+- Round robin is the fastest strategy alone and slows twentyfold under parallel load, because
+  every goroutine increments the same counter and the cache line holding it moves between cores.
+  Least connections only reads shared state in the benchmark and does not pay that cost.
+- Nothing on the request path allocates except forwarding itself.
+
+**Tracking.** The benchmarks workflow (`.github/workflows/benchmarks.yml`) runs them on every
+push to `main`, runs them again on the code as it was before the push, on the same runner, and
+compares the two with benchstat in the run's summary. It never fails the build: shared runners
+vary by several per cent between identical runs, which is too much to gate on. Timing changes
+under about 10% are noise there; any change in bytes or allocations per operation is real.
