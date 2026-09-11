@@ -318,13 +318,13 @@ func transport(cfg *config.Config, backendCount int) http.RoundTripper {
 		KeepAlive: 30 * time.Second,
 	}).DialContext
 
-	// Inbound connections are capped, so at most that many requests can be in
-	// flight upstream; sharing that budget across the pool bounds the idle
-	// connections without throttling reuse.
 	// Abandons a backend that accepts the connection but does not start
 	// answering, so the failure policy can move the request elsewhere.
 	base.ResponseHeaderTimeout = time.Duration(cfg.Timeouts.ResponseTimeout)
 
+	// Inbound connections are capped, so at most that many requests can be in
+	// flight upstream; sharing that budget across the pool bounds the idle
+	// connections without throttling reuse.
 	base.MaxIdleConns = cfg.Limits.MaxConnections
 	base.MaxIdleConnsPerHost = idleConnsPerBackend(cfg.Limits.MaxConnections, backendCount)
 	base.IdleConnTimeout = time.Duration(cfg.Timeouts.IdleTimeout)
