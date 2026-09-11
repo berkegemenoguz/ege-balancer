@@ -7,7 +7,7 @@
 | Author | Berk Egemen Oğuz |
 | Date | 11 September 2026 |
 | Version | 1.8 — supersedes v1.6 and the v1.7 revision notes |
-| Status | Describes v1.0.0 as released, the additions made since, and one addition still planned (§5.4) |
+| Status | Describes v1.0.0 as released and the three additions made since: benchmarks with regression guards, the retry budget, and the power of two choices (§5.4) |
 | Code | `github.com/berkegemenoguz/ege-balancer` |
 | Language | English. A Turkish edition with the same content is [technical-design-v1.8-tr.md](technical-design-v1.8-tr.md) |
 
@@ -28,9 +28,11 @@ concurrent connections sevenfold, from 5,888 to 40,616 requests per second, and 
 latency from 261 ms to 7.7 ms. Two of those fixes are now guarded by deterministic tests that fail
 when the fix is reverted. After the release we added a retry budget that caps retries in flight at
 a share of the requests in flight; against four failing backends it reduced the attempts reaching
-them from 200 to 62 for 50 concurrent requests. Finally we motivate and specify a change to least
-connections — sampling two backends at random and taking the less loaded one — which removes a
-bias we observed toward the first backend in the pool.
+them from 200 to 62 for 50 concurrent requests. Finally we replace the scan in least connections with
+the power of two choices — sampling two backends at random and taking the less loaded one. It
+removed a bias toward the first backend in the pool (100 of 100 sequential requests before, at most
+18 after), made selection cost independent of the pool size (14 ns at 10, 100 and 1,000 backends,
+against 484 ns for the scan at 1,000), and still keeps slow backends avoided under sustained load.
 
 ---
 
@@ -81,8 +83,8 @@ The contributions of the work are:
 3. **A measured evaluation**: a load test with profiling that located three bottlenecks, the
    effect of removing each, microbenchmarks of every hot path, and regression guards that turn two
    of the fixes into failing tests (§10).
-4. **A specified improvement to least connections**, the power of two choices, motivated by a
-   bias we observed in the current implementation (§5.4).
+4. **An improvement to least connections**, the power of two choices, motivated by a bias we
+   measured in the original implementation and evaluated against it (§5.4, §10.7).
 
 The remainder of the document is organised as follows. §2 places the design among existing work.
 §3 states the goals and what is out of scope. §4 through §8 describe the system. §9 describes how
@@ -297,11 +299,11 @@ a scan of the pool under a mutex: O(n) per selection (§10.4).
 ### 5.3 Least connections
 
 Every request increments its backend's in-flight counter before it is forwarded and decrements it
-when it finishes, retries included. Least connections scans the pool and returns the backend with
-the lowest count; ties go to the earliest backend in the pool.
+when it finishes, retries included. Up to v1.0.0, least connections scanned the pool and returned
+the backend with the lowest count; ties went to the earliest backend in the pool.
 
-It adapts to backends of different speed, which the integration suite demonstrates: with one slow
-and two fast backends, 60 concurrent requests gave the slow backend 16 and the fast pair 44. It has
+It adapted to backends of different speed, which the integration suite demonstrated: with one slow
+and two fast backends, 60 concurrent requests gave the slow backend 16 and the fast pair 44. It had
 two weaknesses, both visible in this project:
 
 - **A bias toward the first backend.** Ties are frequent whenever backends answer faster than
@@ -313,13 +315,12 @@ two weaknesses, both visible in this project:
 - **Herding.** Requests that arrive together read the same counters before any of them has
   incremented one, and all choose the same backend.
 
-Selection is also O(n): 4.2 ns over ten backends and 44 ns over a hundred (§10.4). That cost is
-small next to forwarding, but it grows with the pool for no benefit.
+Selection was also O(n): 3.9 ns over ten backends, 47 ns over a hundred and 484 ns over a
+thousand. That cost is small next to forwarding, but it grows with the pool for no benefit.
 
-### 5.4 Power of two choices (planned)
+### 5.4 Power of two choices
 
-> **Status:** specified in this version; to be implemented and evaluated for v1.1.0. §10.7 states
-> the evaluation it must pass. Nothing in this section is a measured result yet.
+> **Status:** implemented for v1.1.0; §10.7 evaluates it against the scan it replaced.
 
 **Algorithm.** For a pool of n backends:
 
@@ -554,7 +555,7 @@ and never fails: timings on shared runners drift by several per cent between ide
 
 ### 9.3 Testing
 
-The suite holds 131 test functions, 25 of them integration tests that start the assembled balancer
+The suite holds 137 test functions, 27 of them integration tests that start the assembled balancer
 on real sockets, and 10 benchmarks. Unit coverage by package:
 
 | Package | Coverage |
@@ -642,17 +643,17 @@ system and network stack, not from the balancer's code.
 | Benchmark | Time per operation | Allocations |
 | --- | --- | --- |
 | Round robin, 10 and 100 backends | 1.9 ns, 1.8 ns | none |
-| Least connections, 10 and 100 backends | 4.2 ns, 44 ns | none |
+| Least connections, 10, 100 and 1,000 backends | 14 ns at every size | none |
 | Weighted round robin, 10 and 100 backends | 177 ns, 1.95 µs | none |
-| RR, LC, WRR with 10 goroutines | 36 ns, 1.2 ns, 274 ns | none |
+| RR, LC, WRR with 10 goroutines | 36 ns, 2.8 ns, 274 ns | none |
 | Health lookup, alone and alongside reports | 7.6 ns, 35 ns | none |
 | Rate limiter, one client and many | 12 ns, 102 ns | none |
 | Retry budget, alone and with 10 goroutines | 3.5 ns, 144 ns | none |
 | Forwarding one request, sequential and parallel | 32 µs, 11 µs | 13 KB, 104 |
 
 Selection is cheap next to forwarding: the slowest case, weighted round robin over a hundred
-backends, is about 6% of the cost of forwarding one request. Weighted round robin and least
-connections grow linearly with the pool; round robin does not. Round robin is the fastest strategy
+backends, is about 6% of the cost of forwarding one request. Weighted round robin grows linearly
+with the pool; round robin and least connections do not. Round robin is the fastest strategy
 alone but slows twentyfold with ten goroutines, because they all increment one counter and the cache
 line holding it moves between cores. Nothing on the request path allocates except forwarding itself.
 
@@ -684,21 +685,33 @@ Retries multiplied the load on the failing pool by four without a budget and by 
 budget costs 3.5 ns alone and 144 ns with ten goroutines contending — about 1% of forwarding a
 request in parallel — and forwarding itself was unchanged at 104 allocations and about 13 KB.
 
-### 10.7 Planned evaluation of the power of two choices
+### 10.7 The power of two choices against the scan
 
-The change specified in §5.4 is accepted for v1.1.0 only if it meets all of the following. Each
-criterion is measured against the current full-scan implementation.
+Each criterion set before the change (§5.4) was measured against the full scan it replaced, on the
+machine described in §10.1.
 
-| | Hypothesis | Measurement | Acceptance |
-| --- | --- | --- | --- |
-| E1 | Selection cost no longer grows with the pool | `BenchmarkSelect` at 10, 100 and 1,000 backends | time per selection within noise across pool sizes; no allocation |
-| E2 | The first-backend bias is gone | 10,000 selections over 10 idle backends, and the 100 sequential requests of §5.3 | every backend within ±20% of an equal share; the full scan gives 100% to the first |
-| E3 | Slow backends are still avoided | the existing integration test: one slow and two fast backends, 60 concurrent requests | the slow backend serves clearly fewer than a third, as today |
-| E4 | Concurrent arrivals spread | a burst of simultaneous requests over equal backends with a held response | a lower maximum in-flight count on any backend than the full scan |
-| E5 | Reproducibility is kept | unit tests with a seeded source | identical results across runs |
+| | Hypothesis | Scan | Power of two choices | Met |
+| --- | --- | --- | --- | --- |
+| E1 | Selection cost no longer grows with the pool | 3.9, 47, 484 ns at 10, 100, 1,000 backends | 14 ns at all three; no allocation | yes |
+| E2 | The first-backend bias is gone | 100 of 100 sequential requests to `backend-1` | at most 18 on any backend in 20 runs; 10,000 idle selections all within 20% of an equal share | yes |
+| E3 | Slow backends are still avoided | sustained load: 7 of 200 to a 40 ms backend | 6–11 of 200 | yes, under sustained load |
+| E4 | Concurrent arrivals spread | a burst of 50 read before any is acquired: all 50 on one backend | at most 8 on one backend | yes |
+| E5 | Reproducibility is kept | — | seeded tests give identical selections across runs | yes |
 
-The results will be added to this section when the change is made; until then, §5.4 is a
-specification, not a finding.
+**Cost.** At ten backends the scan is faster, 3.9 ns against 14 ns, because two random draws cost
+more than ten atomic loads; with ten goroutines selecting at once it is 1.3 ns against 2.8 ns. Both
+differences are about 0.03% of forwarding one request (§10.4). From about thirty backends upwards
+the power of two choices is cheaper, and at a thousand it is 34 times cheaper.
+
+**A single burst.** E3 was first measured with the existing test, in which 60 requests arrive at
+once over one slow and two fast backends. There the slow backend served 16 to 20 of the 60 across
+20 runs, against 16 for the scan — at worst a third, which is an equal share. Most selections in a
+burst see every count at zero, so both strategies choose almost blindly; the scan's 16 came from its
+bias toward the first backend, which in that test was the slow one. Under sustained traffic,
+requests build up on the slow backend and from then on any pair that includes it is won by the
+other backend. The criterion therefore holds under sustained load, and a single burst is the case
+where neither strategy can do better than an even spread. A test for the sustained case was added to
+the integration suite.
 
 ---
 
@@ -755,7 +768,8 @@ CI runners vary by several per cent, which is why only bytes and allocations are
 
 ## 12. Limitations and future work
 
-- **The power of two choices** (§5.4, §10.7) is the next change, planned for v1.1.0.
+- **Least connections in a burst.** When many requests arrive at once, most selections see equal
+  counts, so a slow backend receives an even share until requests build up on it (§10.7).
 - **TLS termination and HTTP/2** remain out of scope; the balancer speaks plain HTTP/1.1.
 - **Health checking in the demo** is only a reachability check, since `http-echo` answers every
   path with 200; a real backend's `/healthz` should check its own dependencies.
@@ -775,8 +789,7 @@ serving about 41,000 requests per second with no failed request on a machine it 
 load. The more durable result is the method. Each decision was written down before it was made;
 each was measured where it could be; and each place where measurement disagreed with the design was
 recorded, fixed and, where possible, turned into a test that fails if the fix is undone. The three
-bottlenecks and both post-release additions came from measurement, not speculation — and so will
-the next one.
+bottlenecks and all three post-release additions came from measurement, not speculation.
 
 ---
 
@@ -883,6 +896,7 @@ The reasoning for each entry is in [`docs/design-deviations.md`](../design-devia
 | 9 | A demo console was added for demonstrations | — | §4.2 |
 | 10 | The latency target is restated in terms of load | 10.3 | §10.3 |
 | 11 | A retry budget was added to the failure policies | 5.5 | §6.5 |
+| 12 | Least connections compares two random backends instead of scanning | 5.2 | §5.4, §10.7 |
 | — | The epoll learning exercise was not carried out | 4.2 | §4.3 |
 
 ---
@@ -893,4 +907,4 @@ The reasoning for each entry is in [`docs/design-deviations.md`](../design-devia
 | --- | --- | --- |
 | 1.1 (v1.6) | 31 August 2026 | The design and twelve-day plan, written before implementation. Turkish. [technical-design-v1.6-tr.md](technical-design-v1.6-tr.md) |
 | 1.7 | 10 September 2026 | Revision notes after v1.0.0: section-by-section edits to bring v1.6 in line with the built system. [Turkish](revision-notes-v1.7-tr.md), [English](revision-notes-v1.7-en.md) |
-| 1.8 | 11 September 2026 | Rewritten as a single design paper in English and Turkish: the system as built, the evaluation, the post-release benchmarks and retry budget, and the planned power of two choices |
+| 1.8 | 11 September 2026 | Rewritten as a single design paper in English and Turkish: the system as built, the evaluation, the post-release benchmarks and retry budget, and the power of two choices, implemented and evaluated for v1.1.0 |
