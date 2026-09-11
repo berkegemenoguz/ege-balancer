@@ -187,3 +187,23 @@ that was also running the load generator and all ten backends. The target is met
 level and missed at the higher one, but the test conditions are not those of a deployment where
 the balancer has the machine to itself. The threshold is worth restating in terms of the load
 actually expected, rather than as one number.
+
+---
+
+## 11. A retry budget was added to the failure policies
+
+**Not in the design document.** After v1.0.
+
+The document's `retry_next_backend` bounds the retries of one request with `max_retries`, and
+nothing more. When the pool starts failing, every request retries at once and the traffic
+reaching the backends grows by up to `1 + max_retries` times, at the moment they can least absorb
+it.
+
+**What is done instead:** retries in flight are capped at `retry.budget_percent` of the requests
+in flight (default 20), with `retry.min_retry_concurrency` always allowed (default 3). A retry the
+budget refuses is answered with 503 and counted as `retry_budget_exhausted`. This follows Envoy's
+retry budget. With four failing backends and fifty concurrent requests, the backends were reached
+200 times without the budget and 62 times with the default one.
+
+It adds two optional fields to the `retry` block, both defaulted, so an existing configuration
+stays valid and gains the budget.
