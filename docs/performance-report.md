@@ -147,9 +147,9 @@ missing pool changes the size of one allocation, not how many there are.
 | Benchmark | Time per operation | Allocations |
 | --- | --- | --- |
 | Round robin, 10 and 100 backends | 1.9 ns, 1.8 ns | none |
-| Least connections, 10 and 100 backends | 4.2 ns, 44 ns | none |
+| Least connections, 10, 100 and 1,000 backends | 14 ns at every size | none |
 | Weighted round robin, 10 and 100 backends | 177 ns, 1.95 µs | none |
-| Round robin, least connections, weighted round robin, 10 goroutines | 36 ns, 1.2 ns, 274 ns | none |
+| Round robin, least connections, weighted round robin, 10 goroutines | 36 ns, 2.8 ns, 274 ns | none |
 | Health lookup, alone and alongside reports | 7.6 ns, 35 ns | none |
 | Rate limiter, one client and many clients | 12 ns, 102 ns | none |
 | Forwarding one request, sequential and parallel | 32 µs, 11 µs | 13 KB, 104 |
@@ -158,11 +158,12 @@ What they show:
 
 - Selection is cheap next to forwarding. The slowest case, weighted round robin over a hundred
   backends, is about 6% of the cost of forwarding one request; over ten backends it is under 1%.
-- Weighted round robin and least connections both grow linearly with the pool, since each visits
-  every backend to choose one. Round robin does not.
+- Weighted round robin grows linearly with the pool, since it visits every backend to choose one.
+  Round robin does not, and neither does least connections since it compares two random backends
+  instead of scanning: the scan it replaced took 484 ns at a thousand backends.
 - Round robin is the fastest strategy alone and slows twentyfold under parallel load, because
   every goroutine increments the same counter and the cache line holding it moves between cores.
-  Least connections only reads shared state in the benchmark and does not pay that cost.
+  Least connections only reads shared state and does not pay that cost.
 - Nothing on the request path allocates except forwarding itself.
 
 **Tracking.** The benchmarks workflow (`.github/workflows/benchmarks.yml`) runs them on every
