@@ -12,8 +12,9 @@ choose, and the whole system is observable through structured logs and Prometheu
 ## Features
 
 - **Three load balancing algorithms**, selectable from configuration: round robin, least
-  connections, and weighted round robin (smooth, so a heavy backend's turns are spread across
-  the cycle rather than bunched together)
+  connections (the less busy of two backends drawn at random, so its cost does not grow with the
+  pool and idle backends share the traffic), and weighted round robin (smooth, so a heavy
+  backend's turns are spread across the cycle rather than bunched together)
 - **Health checking**, active and passive: a periodic HTTP probe, plus the outcome of real
   traffic, feeding the same consecutive-failure thresholds. An unhealthy backend leaves the pool
   and rejoins when it recovers
