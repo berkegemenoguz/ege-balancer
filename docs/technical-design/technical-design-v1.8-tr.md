@@ -7,7 +7,7 @@
 | Yazar | Berk Egemen Oğuz |
 | Tarih | 11 Eylül 2026 |
 | Sürüm | 1.8 — v1.6'nın ve v1.7 revizyon notlarının yerini alır |
-| Durum | Yayınlanan v1.0.0'ı, o günden bu yana yapılan eklemeleri ve henüz planlanan bir eklemeyi (§5.4) anlatır |
+| Durum | Yayınlanan v1.0.0'ı ve o günden bu yana yapılan üç eklemeyi anlatır: regresyon korumalı benchmark'lar, retry budget ve power of two choices (§5.4) |
 | Kod | `github.com/berkegemenoguz/ege-balancer` |
 | Dil | Türkçe. Aynı içerikteki İngilizce sürüm: [technical-design-v1.8-en.md](technical-design-v1.8-en.md) |
 
@@ -28,10 +28,12 @@ throughput'u saniyede 5.888 istekten 40.616 isteğe, yani yedi katına çıkard�
 261 ms'den 7,7 ms'ye indirdi. Bu düzeltmelerden ikisi artık, düzeltme geri alınırsa başarısız olan
 deterministik testlerle korunuyor. Sürümden sonra, uçuştaki retry sayısını uçuştaki isteklerin bir
 payıyla sınırlayan bir retry budget ekledik; dört hatalı backend karşısında 50 eşzamanlı istek için
-backend'lere ulaşan deneme sayısını 200'den 62'ye indirdi. Son olarak least connections için bir
-değişikliği gerekçelendirip tanımlıyoruz — rastgele iki backend örneklemek ve daha az yüklü olanı
-seçmek. Bu değişiklik, mevcut gerçekleştirimde havuzdaki ilk backend'e doğru gözlemlediğimiz bir
-yanlılığı ortadan kaldırır.
+backend'lere ulaşan deneme sayısını 200'den 62'ye indirdi. Son olarak least connections'taki taramayı power of
+two choices ile değiştiriyoruz — rastgele iki backend örneklemek ve daha az yüklü olanı seçmek. Bu
+değişiklik havuzdaki ilk backend'e doğru olan yanlılığı ortadan kaldırdı (önce 100 ardışık isteğin
+100'ü, sonra en fazla 18'i), seçim maliyetini havuz boyutundan bağımsız hale getirdi (10, 100 ve
+1.000 backend'de 14 ns; taramada 1.000 backend'de 484 ns) ve sürekli yük altında yavaş backend'lerden
+kaçınmayı korudu.
 
 ---
 
@@ -83,8 +85,8 @@ yerde bunu kayda geçirir.
 3. **Ölçülmüş bir değerlendirme:** üç darboğazı bulan profilli bir yük testi, her birinin
    giderilmesinin etkisi, her sıcak yolun mikro benchmark'ları ve düzeltmelerden ikisini başarısız
    olabilen testlere dönüştüren regresyon korumaları (§10).
-4. **Least connections için tanımlanmış bir iyileştirme:** mevcut gerçekleştirimde gözlemlediğimiz
-   bir yanlılıktan yola çıkan power of two choices (§5.4).
+4. **Least connections için bir iyileştirme:** özgün gerçekleştirimde ölçtüğümüz bir yanlılıktan
+   yola çıkan ve ona karşı değerlendirilen power of two choices (§5.4, §10.7).
 
 Belgenin geri kalanı şöyle düzenlenmiştir. §2 tasarımı mevcut çalışmalar arasına yerleştirir. §3
 hedefleri ve kapsam dışını belirtir. §4-§8 sistemi anlatır. §9 nasıl inşa edildiğini anlatır. §10
@@ -301,12 +303,11 @@ taranmasıdır: seçim başına O(n) (§10.4).
 ### 5.3 Least connections
 
 Her istek, iletilmeden önce backend'inin uçuştaki istek sayacını artırır ve bittiğinde — retry'lar
-dahil — azaltır. Least connections havuzu tarar ve sayısı en düşük olan backend'i döndürür;
-eşitlikte havuzdaki ilk backend seçilir.
+dahil — azaltır. v1.0.0'a kadar least connections havuzu tarayıp sayısı en düşük olan backend'i
+döndürüyordu; eşitlikte havuzdaki ilk backend seçiliyordu.
 
-Hızı farklı backend'lere uyum sağlar; entegrasyon testleri bunu gösterir: bir yavaş ve iki hızlı
-backend ile 60 eşzamanlı istekten yavaş olan 16, hızlı ikili 44 istek aldı. İki zayıflığı vardır ve
-ikisi de bu projede görüldü:
+Hızı farklı backend'lere uyum sağlıyordu; entegrasyon testleri bunu gösterdi: bir yavaş ve iki hızlı
+backend ile 60 eşzamanlı istekten yavaş olan 16, hızlı ikili 44 istek aldı. İki zayıflığı vardı ve ikisi de bu projede görüldü:
 
 - **İlk backend'e doğru bir yanlılık.** Backend'ler istekler geldiğinden daha hızlı cevap verdiğinde
   eşitlikler sık olur. Little yasasına göre saniyede 20 istek ve istek başına bir milisaniyede
@@ -317,14 +318,13 @@ ikisi de bu projede görüldü:
 - **Sürü davranışı (herding).** Birlikte gelen istekler, hiçbiri sayacı artırmadan önce aynı
   sayaçları okur ve hepsi aynı backend'i seçer.
 
-Seçim ayrıca O(n)'dir: on backend üzerinde 4,2 ns, yüz backend üzerinde 44 ns (§10.4). Bu maliyet
+Seçim ayrıca O(n)'di: on backend üzerinde 3,9 ns, yüz backend üzerinde 47 ns, bin backend
+üzerinde 484 ns. Bu maliyet
 iletmenin yanında küçüktür, ama hiçbir fayda sağlamadan havuzla birlikte büyür.
 
-### 5.4 Power of two choices (planlanan)
+### 5.4 Power of two choices
 
-> **Durum:** bu sürümde tanımlandı; v1.1.0 için gerçekleştirilecek ve değerlendirilecek. §10.7
-> geçmesi gereken değerlendirmeyi belirtir. Bu bölümdeki hiçbir şey henüz ölçülmüş bir sonuç
-> değildir.
+> **Durum:** v1.1.0 için gerçekleştirildi; §10.7 onu yerini aldığı taramaya karşı değerlendirir.
 
 **Algoritma.** n backend'lik bir havuz için:
 
@@ -561,8 +561,8 @@ yüzde birkaç oynar.
 
 ### 9.3 Test
 
-Test paketi, 25'i birleştirilmiş yük dengeleyiciyi gerçek soketlerde başlatan entegrasyon testi
-olmak üzere 131 test fonksiyonu ve 10 benchmark içerir. Paket bazında birim test kapsamı:
+Test paketi, 27'si birleştirilmiş yük dengeleyiciyi gerçek soketlerde başlatan entegrasyon testi
+olmak üzere 137 test fonksiyonu ve 10 benchmark içerir. Paket bazında birim test kapsamı:
 
 | Paket | Kapsam |
 | --- | --- |
@@ -651,17 +651,17 @@ yığınından gelir.
 | Benchmark | İşlem başına süre | Bellek ayırma |
 | --- | --- | --- |
 | Round robin, 10 ve 100 backend | 1,9 ns, 1,8 ns | yok |
-| Least connections, 10 ve 100 backend | 4,2 ns, 44 ns | yok |
+| Least connections, 10, 100 ve 1.000 backend | her boyutta 14 ns | yok |
 | Weighted round robin, 10 ve 100 backend | 177 ns, 1,95 µs | yok |
-| 10 goroutine ile RR, LC, WRR | 36 ns, 1,2 ns, 274 ns | yok |
+| 10 goroutine ile RR, LC, WRR | 36 ns, 2,8 ns, 274 ns | yok |
 | Sağlık sorgusu, tek başına ve raporlarla birlikte | 7,6 ns, 35 ns | yok |
 | Hız sınırlayıcı, tek istemci ve çok istemci | 12 ns, 102 ns | yok |
 | Retry budget, tek başına ve 10 goroutine ile | 3,5 ns, 144 ns | yok |
 | Tek bir isteği iletmek, sıralı ve paralel | 32 µs, 11 µs | 13 KB, 104 |
 
 Seçim, iletmenin yanında ucuzdur: en yavaş durum olan yüz backend üzerinde weighted round robin,
-tek bir isteği iletmenin maliyetinin yaklaşık %6'sıdır. Weighted round robin ve least connections
-havuzla doğrusal büyür; round robin büyümez. Round robin tek başına en hızlı stratejidir ama on
+tek bir isteği iletmenin maliyetinin yaklaşık %6'sıdır. Weighted round robin havuzla doğrusal
+büyür; round robin ve least connections büyümez. Round robin tek başına en hızlı stratejidir ama on
 goroutine ile yirmi kat yavaşlar, çünkü hepsi tek bir sayacı artırır ve onu tutan cache line
 çekirdekler arasında gidip gelir. İstek yolunda iletmenin kendisi dışında hiçbir şey bellek ayırmaz.
 
@@ -694,21 +694,32 @@ Retry'lar hatalı havuz üzerindeki yükü budget olmadan dört katına, budget 
 Budget tek başına 3,5 ns, on goroutine yarışırken 144 ns tutar — paralel olarak bir isteği iletmenin
 yaklaşık %1'i — ve iletmenin kendisi 104 bellek ayırma ve yaklaşık 13 KB'ta değişmeden kaldı.
 
-### 10.7 Power of two choices için planlanan değerlendirme
+### 10.7 Taramaya karşı power of two choices
 
-§5.4'te tanımlanan değişiklik, v1.1.0 için ancak aşağıdakilerin tamamını karşılarsa kabul edilir. Her
-ölçüt, mevcut tam tarama gerçekleştirimine karşı ölçülür.
+Değişiklikten önce konan her ölçüt (§5.4), yerini aldığı tam taramaya karşı, §10.1'de anlatılan
+makinede ölçüldü.
 
-| | Hipotez | Ölçüm | Kabul |
-| --- | --- | --- | --- |
-| E1 | Seçim maliyeti artık havuzla büyümüyor | 10, 100 ve 1.000 backend'de `BenchmarkSelect` | havuz boyutları arasında seçim süresi gürültü sınırında; bellek ayırma yok |
-| E2 | İlk backend yanlılığı ortadan kalktı | 10 boşta backend üzerinde 10.000 seçim ve §5.3'teki 100 ardışık istek | her backend eşit payın ±%20'si içinde; tam tarama ilk backend'e %100 verir |
-| E3 | Yavaş backend'lerden hâlâ kaçınılıyor | mevcut entegrasyon testi: bir yavaş ve iki hızlı backend, 60 eşzamanlı istek | yavaş backend, bugünkü gibi üçte birin açıkça altında istek alır |
-| E4 | Eşzamanlı gelen istekler dağılıyor | eşit backend'ler üzerinde, yanıtı bekletilen eşzamanlı bir istek patlaması | herhangi bir backend'de tam taramadakinden daha düşük en yüksek uçuştaki istek sayısı |
-| E5 | Yeniden üretilebilirlik korunuyor | tohumlanmış kaynakla birim testleri | çalıştırmalar arasında aynı sonuçlar |
+| | Hipotez | Tarama | Power of two choices | Karşılandı |
+| --- | --- | --- | --- | --- |
+| E1 | Seçim maliyeti artık havuzla büyümüyor | 10, 100, 1.000 backend'de 3,9, 47, 484 ns | üçünde de 14 ns; bellek ayırma yok | evet |
+| E2 | İlk backend yanlılığı ortadan kalktı | 100 ardışık isteğin 100'ü `backend-1`'e | 20 çalıştırmada bir backend'de en fazla 18; 10.000 boşta seçimin hepsi eşit payın %20'si içinde | evet |
+| E3 | Yavaş backend'lerden hâlâ kaçınılıyor | sürekli yük: 40 ms'lik backend'e 200'de 7 | 200'de 6–11 | evet, sürekli yük altında |
+| E4 | Eşzamanlı gelen istekler dağılıyor | hiçbiri alınmadan okunan 50'lik bir burst: 50'si bir backend'e | bir backend'de en fazla 8 | evet |
+| E5 | Yeniden üretilebilirlik korunuyor | — | tohumlanmış testler çalıştırmalar arasında aynı seçimleri verir | evet |
 
-Sonuçlar değişiklik yapıldığında bu bölüme eklenecek; o zamana dek §5.4 bir bulgu değil, bir
-tanımdır.
+**Maliyet.** On backend'de tarama daha hızlıdır, 14 ns'ye karşı 3,9 ns, çünkü iki rastgele çekiliş
+on atomik okumadan pahalıdır; on goroutine aynı anda seçim yaparken 2,8 ns'ye karşı 1,3 ns'dir. İki
+fark da tek bir isteği iletmenin yaklaşık %0,03'üdür (§10.4). Yaklaşık otuz backend'den itibaren
+power of two choices daha ucuzdur, bin backend'de ise 34 kat daha ucuzdur.
+
+**Tek bir burst.** E3 önce, 60 isteğin bir yavaş ve iki hızlı backend üzerine aynı anda geldiği
+mevcut testle ölçüldü. Orada yavaş backend 20 çalıştırmada 60 isteğin 16 ile 20'sini aldı, tarama
+ise 16 — en kötü durumda üçte bir, yani eşit bir pay. Bir burst'teki seçimlerin çoğu tüm sayaçları
+sıfır görür, bu yüzden iki strateji de neredeyse körlemesine seçer; taramanın 16'sı, o testte yavaş
+olan ilk backend'e doğru yanlılığından geliyordu. Sürekli trafikte istekler yavaş backend'de birikir
+ve o andan itibaren onu içeren her çifti diğer backend kazanır. Dolayısıyla ölçüt sürekli yük altında
+tutar; tek bir burst ise hiçbir stratejinin eşit dağılımdan daha iyisini yapamadığı durumdur. Sürekli
+durum için entegrasyon paketine bir test eklendi.
 
 ---
 
@@ -767,7 +778,8 @@ bu yüzden yalnızca bayt ve bellek ayırma sayıları kapı olarak kullanılır
 
 ## 12. Sınırlar ve gelecek çalışmalar
 
-- **Power of two choices** (§5.4, §10.7) bir sonraki değişikliktir ve v1.1.0 için planlanmıştır.
+- **Burst altında least connections.** Çok sayıda istek aynı anda geldiğinde seçimlerin çoğu eşit
+  sayılar görür; bu yüzden yavaş bir backend, üzerinde istekler birikene kadar eşit pay alır (§10.7).
 - **TLS sonlandırma ve HTTP/2** kapsam dışında kalmaya devam ediyor; yük dengeleyici düz HTTP/1.1
   konuşur.
 - **Demo'daki sağlık kontrolü** yalnızca bir erişilebilirlik kontrolüdür, çünkü `http-echo` her
@@ -790,7 +802,7 @@ bir imajda, kendi yüküyle paylaştığı bir makinede hiçbir isteği başarı
 41.000 istek karşılar. Daha kalıcı sonuç ise yöntemdir. Her karar verilmeden önce yazıya döküldü;
 ölçülebildiği yerde ölçüldü; ölçümün tasarımla çeliştiği her yer kayda geçirildi, düzeltildi ve
 mümkün olduğunda, düzeltme geri alınırsa başarısız olan bir teste dönüştürüldü. Üç darboğaz ve sürüm
-sonrası iki ekleme spekülasyondan değil ölçümden geldi — bir sonraki de öyle olacak.
+sonrası üç ekleme spekülasyondan değil ölçümden geldi.
 
 ---
 
@@ -897,6 +909,7 @@ Her maddenin gerekçesi [`docs/design-deviations.md`](../design-deviations.md) d
 | 9 | Gösterimler için bir demo konsolu eklendi | — | §4.2 |
 | 10 | Gecikme hedefi yük cinsinden yeniden ifade edildi | 10.3 | §10.3 |
 | 11 | Hata stratejilerine bir retry budget eklendi | 5.5 | §6.5 |
+| 12 | Least connections taramak yerine rastgele iki backend'i karşılaştırır | 5.2 | §5.4, §10.7 |
 | — | Epoll öğrenme egzersizi yapılmadı | 4.2 | §4.3 |
 
 ---
@@ -907,4 +920,4 @@ Her maddenin gerekçesi [`docs/design-deviations.md`](../design-deviations.md) d
 | --- | --- | --- |
 | 1.1 (v1.6) | 31 Ağustos 2026 | Gerçekleştirimden önce yazılan tasarım ve on iki günlük plan. Türkçe. [technical-design-v1.6-tr.md](technical-design-v1.6-tr.md) |
 | 1.7 | 10 Eylül 2026 | v1.0.0 sonrası revizyon notları: v1.6'yı inşa edilen sisteme uyduran bölüm bölüm düzenlemeler. [Türkçe](revision-notes-v1.7-tr.md), [İngilizce](revision-notes-v1.7-en.md) |
-| 1.8 | 11 Eylül 2026 | İngilizce ve Türkçe tek bir tasarım makalesi olarak yeniden yazıldı: inşa edilen sistem, değerlendirme, sürüm sonrası benchmark'lar ve retry budget, ve planlanan power of two choices |
+| 1.8 | 11 Eylül 2026 | İngilizce ve Türkçe tek bir tasarım makalesi olarak yeniden yazıldı: inşa edilen sistem, değerlendirme, sürüm sonrası benchmark'lar ve retry budget, ve v1.1.0 için gerçekleştirilip değerlendirilen power of two choices |
