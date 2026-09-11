@@ -12,6 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history, so that the state before this push is always
+          # there to compare against, however many commits the push carried.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -26,7 +30,26 @@ jobs:
       # the CI workflow with everything else.
       - name: Run the benchmarks
         shell: bash
-        run: go test -run '^$' -bench . -benchmem -count=6 -benchtime=500ms ./... | tee benchmarks.txt
+        run: go test -run '^$' -bench . -benchmem -count=6 -benchtime=500ms ./... | tee after.txt
+
+      # The baseline is measured here, on the same runner in the same job,
+      # rather than taken from an earlier run: two machines' figures are not
+      # comparable, two measurements from one machine are.
+      - name: Run the benchmarks as they were before this push
+        shell: bash
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          touch before.txt
+          # A push that creates the branch has no previous state to compare with.
+          if [[ $BEFORE =~ ^0+$ ]] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            exit 0
+          fi
+          git worktree add ../before "$BEFORE"
+          cd ../before
+          # A baseline that does not build simply leaves nothing to compare.
+          go test -run '^$' -bench . -benchmem -count=6 -benchtime=500ms ./... \
+            > "$GITHUB_WORKSPACE/before.txt" || true
 
       - name: Summarise
         shell: bash
@@ -34,15 +57,28 @@ jobs:
           {
             echo "## Benchmarks"
             echo
-            echo "Six runs of each, summarised by benchstat. Timings on a shared runner vary"
-            echo "between runs; bytes and allocations per operation do not."
-            echo
-            echo '```'
-            benchstat benchmarks.txt
-            echo '```'
+            if grep -q '^Benchmark' before.txt; then
+              echo "Compared with the state before this push, both measured on this runner in this"
+              echo "job. The same code measured twice here differs by a few percent, and benchstat can"
+              echo "still mark that significant, so read timing changes under about 10% as noise."
+              echo "Bytes and allocations per operation are exact: any change in those is real."
+              echo
+              echo '```'
+              benchstat before.txt after.txt
+              echo '```'
+            else
+              echo "There is no earlier state with benchmarks to compare with; these are this"
+              echo "commit's own figures, six runs each."
+              echo
+              echo '```'
+              benchstat after.txt
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
           name: benchmarks
-          path: benchmarks.txt
+          path: |
+            before.txt
+            after.txt
