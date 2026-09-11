@@ -56,12 +56,14 @@ func TestMetricsReportServedRequests(t *testing.T) {
 func TestMetricsReportFailuresAndRejections(t *testing.T) {
 	metrics := NewMetrics()
 	metrics.ObserveBackendFailure("backend-1:5678")
+	metrics.ObserveRetry()
 	metrics.ObserveRejection("rate_limited")
 	metrics.ObserveRejection("rate_limited")
 
 	body := scrape(t, metrics.Handler())
 	for _, want := range []string{
 		`lb_backend_failures_total{backend="backend-1:5678"} 1`,
+		`lb_retries_total 1`,
 		`lb_rejected_requests_total{reason="rate_limited"} 2`,
 	} {
 		if !strings.Contains(body, want) {

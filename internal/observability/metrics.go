@@ -17,6 +17,7 @@ type Metrics struct {
 	requests   *prometheus.CounterVec
 	duration   *prometheus.HistogramVec
 	failures   *prometheus.CounterVec
+	retries    prometheus.Counter
 	rejections *prometheus.CounterVec
 	reloads    *prometheus.CounterVec
 }
@@ -41,6 +42,10 @@ func NewMetrics() *Metrics {
 			Name: "lb_backend_failures_total",
 			Help: "Attempts a backend could not serve, by backend.",
 		}, []string{"backend"}),
+		retries: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "lb_retries_total",
+			Help: "Retries sent after a failed attempt. Retries the budget refused are counted as rejections.",
+		}),
 		rejections: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lb_rejected_requests_total",
 			Help: "Requests refused by the load balancer itself, by reason.",
@@ -51,7 +56,7 @@ func NewMetrics() *Metrics {
 		}, []string{"result"}),
 	}
 
-	m.registry.MustRegister(m.requests, m.duration, m.failures, m.rejections, m.reloads)
+	m.registry.MustRegister(m.requests, m.duration, m.failures, m.retries, m.rejections, m.reloads)
 	return m
 }
 
@@ -64,6 +69,11 @@ func (m *Metrics) ObserveRequest(backend, status string, took time.Duration) {
 // ObserveBackendFailure records an attempt that a backend could not serve.
 func (m *Metrics) ObserveBackendFailure(backend string) {
 	m.failures.WithLabelValues(backend).Inc()
+}
+
+// ObserveRetry records a retry the retry budget allowed.
+func (m *Metrics) ObserveRetry() {
+	m.retries.Inc()
 }
 
 // ObserveRejection records a request the load balancer refused itself, for
