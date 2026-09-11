@@ -23,3 +23,6 @@ differ, the reason is recorded here and collected in [design deviations](../desi
 | 12 | Production readiness and release | [day-12.md](day-12.md) |
 
 Day 10 also produced the [performance report](../performance-report.md).
+
+Work after the v1.0.0 release is recorded by addition rather than by day, in
+[after-release.md](after-release.md).
