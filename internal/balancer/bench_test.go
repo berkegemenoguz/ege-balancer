@@ -19,9 +19,10 @@ var strategies = []struct {
 	{"weighted_round_robin", func() LBStrategy { return NewWeightedRoundRobin() }},
 }
 
-// poolSizes covers the mock environment and a pool ten times its size, where a
-// strategy that walks the whole pool starts to show it.
-var poolSizes = []int{10, 100}
+// poolSizes covers the mock environment and pools ten and a hundred times its
+// size, where a strategy that walks the whole pool shows it and one that does
+// not stays flat.
+var poolSizes = []int{10, 100, 1000}
 
 func BenchmarkSelect(b *testing.B) {
 	for _, strategy := range strategies {
