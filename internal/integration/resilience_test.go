@@ -86,6 +86,60 @@ func TestRetryHidesADeadBackendFromClients(t *testing.T) {
 	}
 }
 
+func TestRetryBudgetStopsARetryStorm(t *testing.T) {
+	const requests = 50
+
+	// Every backend fails, slowly enough that the requests overlap. A request may
+	// try all four, so without a budget the pool receives four times the client
+	// traffic at the moment it can least absorb it.
+	storm := func(t *testing.T, budgetPercent float64) (hits int64, metrics string) {
+		backends := newBackends(t, 4)
+		for _, b := range backends {
+			b.fail()
+			b.slowDown(100 * time.Millisecond)
+		}
+
+		cfg := testConfig(backends)
+		cfg.FailurePolicy = config.RetryNextBackend
+		cfg.RetryOn5xx = true
+		cfg.Retry.MaxRetries = 3
+		cfg.Retry.BudgetPercent = budgetPercent
+		cfg.Retry.MinRetryConcurrency = 1
+		cfg.HealthCheck.UnhealthyThreshold = 1000
+
+		under := start(t, cfg)
+		under.sendConcurrently(t, requests)
+
+		for _, b := range backends {
+			hits += b.hits.Load()
+		}
+		return hits, under.scrape(t)
+	}
+
+	t.Run("without a limit every request is tried four times", func(t *testing.T) {
+		// A request cannot have more retries in flight than itself, so a budget
+		// of the whole load never refuses one.
+		hits, metrics := storm(t, 100)
+		if hits != 4*requests {
+			t.Errorf("the backends were reached %d times, want %d", hits, 4*requests)
+		}
+		if want := "lb_retries_total 150"; !strings.Contains(metrics, want) {
+			t.Errorf("metrics do not contain %q", want)
+		}
+	})
+
+	t.Run("the default share holds retries to a fraction", func(t *testing.T) {
+		hits, metrics := storm(t, 20)
+		t.Logf("%d client requests reached the failing backends %d times", requests, hits)
+		if hits >= 2*requests {
+			t.Errorf("the backends were reached %d times, want fewer than %d", hits, 2*requests)
+		}
+		if want := `lb_rejected_requests_total{reason="retry_budget_exhausted"}`; !strings.Contains(metrics, want) {
+			t.Errorf("metrics do not contain %q", want)
+		}
+	})
+}
+
 func TestFailFastSurfacesTheFailure(t *testing.T) {
 	const requests = 30
 
