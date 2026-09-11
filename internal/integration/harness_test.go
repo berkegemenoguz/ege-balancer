@@ -44,6 +44,12 @@ type backend struct {
 	probes  atomic.Int64
 	failing atomic.Bool
 	delay   atomic.Int64
+
+	// dead makes the backend drop every connection without answering, as a
+	// crashed process would, while keeping its port. Closing the server instead
+	// would free the port, and whatever listener is handed it next — the
+	// balancer's own included — would answer in the dead backend's place.
+	dead atomic.Bool
 }
 
 // newBackend starts a mock backend named name.
@@ -52,6 +58,12 @@ func newBackend(t *testing.T, name string) *backend {
 
 	b := &backend{name: name}
 	b.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if b.dead.Load() {
+			if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
 		if r.URL.Path == "/healthz" {
 			b.probes.Add(1)
 		} else {
@@ -80,6 +92,10 @@ func (b *backend) addr() string {
 
 // fail makes the backend answer 500 until it is healed.
 func (b *backend) fail() { b.failing.Store(true) }
+
+// kill makes the backend drop every connection from now on, without giving up
+// its port.
+func (b *backend) kill() { b.dead.Store(true) }
 
 // heal makes the backend answer normally again.
 func (b *backend) heal() { b.failing.Store(false) }

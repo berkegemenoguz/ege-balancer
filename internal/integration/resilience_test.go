@@ -71,8 +71,8 @@ func TestRetryHidesADeadBackendFromClients(t *testing.T) {
 	// Long enough that the health checker cannot mask the retry behaviour.
 	cfg.HealthCheck.UnhealthyThreshold = 1000
 
-	// A backend that refuses connections outright, not one answering 500.
-	backends[1].server.Close()
+	// A backend that drops the connection without answering, not one answering 500.
+	backends[1].kill()
 
 	under := start(t, cfg)
 	bodies, statuses := under.send(t, requests)
@@ -148,7 +148,7 @@ func TestFailFastSurfacesTheFailure(t *testing.T) {
 	cfg.FailurePolicy = config.FailFast
 	cfg.HealthCheck.UnhealthyThreshold = 1000
 
-	backends[1].server.Close()
+	backends[1].kill()
 
 	under := start(t, cfg)
 	_, statuses := under.send(t, requests)
@@ -166,7 +166,7 @@ func TestClientsGet503WhenEveryBackendIsUnreachable(t *testing.T) {
 	under := start(t, testConfig(backends))
 
 	for _, b := range backends {
-		b.server.Close()
+		b.kill()
 	}
 
 	response, err := http.Get(under.url)
@@ -252,8 +252,8 @@ func TestSuddenBackendLossIsAbsorbed(t *testing.T) {
 	under.send(t, requests)
 
 	// Two of the four vanish mid-flight, without warning.
-	backends[1].server.Close()
-	backends[3].server.Close()
+	backends[1].kill()
+	backends[3].kill()
 
 	bodies, statuses := under.send(t, requests)
 
