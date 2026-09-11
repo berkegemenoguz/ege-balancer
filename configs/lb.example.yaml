@@ -12,6 +12,8 @@ retry_on_5xx: false
 
 retry:
   max_retries: 2
+  budget_percent: 20          # retries in flight: at most this share of the requests in flight
+  min_retry_concurrency: 3    # but always at least this many
 
 circuit_breaker:
   failure_threshold: 5
