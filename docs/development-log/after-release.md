@@ -176,6 +176,15 @@ sustained traffic both kept the slow backend to 6–11 of 200 requests. The crit
 for sustained load, a test for that case was added, and the burst case is recorded as a limit rather
 than hidden.
 
+**CI failed a test this change did not touch.** The push failed in `TestFailFastSurfacesTheFailure`,
+which uses round robin: of 30 requests, the ten meant for a dead backend should have been 503, and
+none were. The test killed its backend by closing the server, which frees the port — and a freed port
+can be handed to the next listener that asks, the balancer's own sockets bound a moment later
+included. Whatever took it answered for the dead backend. The failure did not reproduce in 200 runs
+on macOS, so the cause is the likely one rather than a proven one; but the fault in the test is
+certain either way. A dead backend now keeps its port and drops every connection without answering,
+as a crashed process would, and the four tests that closed a server use it.
+
 **Small pools got slower.** Two random draws cost more than ten atomic loads: 14 ns against 3.9 ns
 at ten backends. It is about 0.03% of forwarding a request, and the break-even is around thirty
 backends; the paper states it.
