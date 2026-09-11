@@ -131,3 +131,63 @@ Four backends that all fail slowly, fifty concurrent requests, up to three retri
 The proxy test for a spent budget fails when the budget check is removed. The budget costs
 3.5 ns alone and 144 ns with ten goroutines contending for it — about 1% of forwarding a request
 in parallel — and forwarding itself is unchanged at 104 allocations and about 13 KB.
+
+## Power of two choices
+
+**Why.** Measuring for the design paper showed least connections sending every one of 100
+sequential requests to `backend-1`. The scan broke ties by pool order, and with backends answering
+in about a millisecond almost every selection is a tie: nothing is in flight. It was also O(n), and
+requests arriving together all chose the same backend.
+
+### What was built
+
+- Least connections now draws two different backends at random and takes the less busy. With two
+  backends that is the whole pool, so the choice is exact; with one it is that backend.
+- The random source is a field of the strategy: `math/rand/v2` in the proxy, a seeded generator in
+  the unit tests.
+- Tests for each acceptance criterion the design paper set before the change: idle backends shared
+  evenly, the busiest of a pair never chosen, a burst spread, seeded runs reproducible, sequential
+  traffic spread over real sockets, and a slow backend avoided under sustained load.
+- The selection benchmarks now include a pool of a thousand backends.
+
+### Decisions
+
+**Criteria first.** The paper stated five acceptance criteria before any code was written, so the
+change was judged against a bar it could not move.
+
+**Keep the name.** The strategy still answers to `least_connections`. It still sends requests to the
+less busy backends, configurations need no change, and Envoy made the same choice.
+
+**Distinct draws without retrying.** The second index is drawn from one fewer and steps over the
+first, so the two always differ and a two-backend pool is always compared in full.
+
+**Seeded tests rather than statistical ones.** Deterministic tests were a principle since
+weighted round robin. A seeded source keeps the unit tests exact; only the tests over real sockets,
+where timing already varies, assert bounds.
+
+### What went wrong
+
+**One criterion did not hold as first measured.** The existing test sends 60 requests at once to one
+slow and two fast backends, and the slow backend served 16 to 20 of them — up to a third, not
+"clearly fewer". Measuring the old scan beside it explained why: in a single burst almost every
+selection sees all counts at zero, so neither strategy can do better than an even spread, and the
+scan's 16 came from its bias toward the first backend, which in that test was the slow one. Under
+sustained traffic both kept the slow backend to 6–11 of 200 requests. The criterion was restated
+for sustained load, a test for that case was added, and the burst case is recorded as a limit rather
+than hidden.
+
+**Small pools got slower.** Two random draws cost more than ten atomic loads: 14 ns against 3.9 ns
+at ten backends. It is about 0.03% of forwarding a request, and the break-even is around thirty
+backends; the paper states it.
+
+### Verification
+
+| Criterion | Scan | Power of two choices |
+| --- | --- | --- |
+| Cost at 10, 100, 1,000 backends | 3.9, 47, 484 ns | 14, 14, 14 ns |
+| 100 sequential requests, most on one backend | 100 | at most 18 in 20 runs |
+| Burst of 50, most on one backend | 50 | 8 |
+| Slow backend, sustained load | 7 of 200 | 6–11 of 200 |
+| Slow backend, one burst of 60 | 16 of 60 | 16–20 of 60 |
+
+The integration tests ran 20 times on two CPUs under `-race`. Coverage of `balancer` stayed at 100%.
