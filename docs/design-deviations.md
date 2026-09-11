@@ -207,3 +207,23 @@ retry budget. With four failing backends and fifty concurrent requests, the back
 
 It adds two optional fields to the `retry` block, both defaulted, so an existing configuration
 stays valid and gains the budget.
+
+---
+
+## 12. Least connections compares two random backends instead of scanning
+
+**Section 5.2.** After v1.0.
+
+The document describes least connections as choosing the backend with the fewest active
+connections, which the first implementation did by scanning the whole pool.
+
+**What is done instead:** two different backends are drawn at random and the less busy of the two
+serves the request — the power of two choices, as in Envoy's least request balancer. The
+configuration name stays `least_connections`.
+
+**Why:** the scan broke ties by pool order, and ties are the common case when backends answer
+faster than requests arrive: 100 sequential requests over ten backends all went to the first one.
+Requests arriving together also read the same counters and piled onto the same backend. Two random
+samples remove both, cost 14 ns whatever the pool size where the scan grew to 484 ns at a thousand
+backends, and still keep a slow backend avoided under sustained load: 6 to 11 of 200 requests,
+against 7 for the scan.
