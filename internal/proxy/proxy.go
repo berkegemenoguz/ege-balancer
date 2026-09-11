@@ -48,6 +48,7 @@ type settings struct {
 	strategy balancer.LBStrategy
 	backends []*balancer.Backend
 	breaker  *breaker
+	budget   *retryBudget
 	// attempts is how many backends a single request may be offered to.
 	attempts   int
 	retryOn5xx bool
@@ -108,6 +109,7 @@ func settingsFor(cfg *config.Config, strategy balancer.LBStrategy, backends []*b
 		strategy:   strategy,
 		backends:   backends,
 		breaker:    newBreaker(cfg.FailurePolicy, cfg.CircuitBreaker),
+		budget:     newRetryBudget(cfg.Retry),
 		attempts:   attemptsFor(cfg),
 		retryOn5xx: cfg.RetryOn5xx,
 		maxBody:    cfg.Limits.MaxRequestBodyBytes,
@@ -154,8 +156,8 @@ func (c *Core) newReverseProxy(cfg *config.Config, backendCount int) *httputil.R
 	}
 }
 
-// ServeHTTP offers the request to healthy backends until one serves it or the
-// configured number of attempts runs out.
+// ServeHTTP offers the request to healthy backends until one serves it, the
+// configured number of attempts runs out, or the retry budget refuses a retry.
 func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// One snapshot for the whole request: a reload part way through must not
 	// change the rules this request is being judged by.
@@ -168,15 +170,30 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	active.budget.requestStarted()
+	defer active.budget.requestFinished()
+
 	tried := make(map[string]bool, active.attempts)
-	for range active.attempts {
+	for n := range active.attempts {
 		backend, err := active.strategy.Select(c.available(active, tried))
 		if err != nil {
 			break
 		}
 		tried[backend.Addr] = true
 
-		if c.serve(w, r, active, backend, body) {
+		retry := n > 0
+		if retry && !active.budget.tryRetry() {
+			slog.Warn("retry budget exhausted, not retrying", "method", r.Method, "path", r.URL.Path)
+			c.metrics.ObserveRejection("retry_budget_exhausted")
+			unavailable(w)
+			return
+		}
+
+		served := c.serve(w, r, active, backend, body)
+		if retry {
+			active.budget.retryFinished()
+		}
+		if served {
 			return
 		}
 	}

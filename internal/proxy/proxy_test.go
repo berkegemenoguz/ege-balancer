@@ -75,6 +75,7 @@ func (f *fakeChecker) reported() (successes, failures []string) {
 func testConfig() *config.Config {
 	return &config.Config{
 		FailurePolicy: config.FailFast,
+		Retry:         config.Retry{BudgetPercent: 20, MinRetryConcurrency: 3},
 		Timeouts:      config.Timeouts{ConnectTimeout: config.Duration(time.Second)},
 		Limits:        config.Limits{MaxRequestBodyBytes: 1 << 20},
 	}

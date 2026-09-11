@@ -102,6 +102,37 @@ func TestRetryNeverRepeatsABackend(t *testing.T) {
 	}
 }
 
+func TestRetryIsRefusedWhenTheBudgetIsSpent(t *testing.T) {
+	var served int
+	backends := []*balancer.Backend{{Addr: unreachable}, echoBackend(t, "backend-2", &served)}
+
+	cfg := testConfig()
+	cfg.FailurePolicy = config.RetryNextBackend
+	cfg.Retry.MaxRetries = 2
+	cfg.Retry.MinRetryConcurrency = 1
+
+	handler := New(cfg, balancer.NewRoundRobin(), backends, allHealthy, testMetrics())
+
+	// Another request's retry holds the only retry this load allows.
+	budget := handler.core.current.Load().budget
+	budget.tryRetry()
+
+	response := send(handler, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d with the budget spent", response.Code, http.StatusServiceUnavailable)
+	}
+	if served != 0 {
+		t.Errorf("the healthy backend served %d requests, want the retry refused", served)
+	}
+
+	// Once that retry finishes, the budget allows this one again.
+	budget.retryFinished()
+	response = send(handler, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK {
+		t.Errorf("status = %d, want the retry allowed once the budget has room", response.Code)
+	}
+}
+
 func TestFailFastDoesNotRetry(t *testing.T) {
 	var served int
 	backends := []*balancer.Backend{{Addr: unreachable}, echoBackend(t, "backend-2", &served)}
