@@ -6,8 +6,9 @@ Incoming HTTP traffic is distributed across multiple backends using a configurab
 unhealthy backends are taken out of the pool automatically, failures are handled by a policy you
 choose, and the whole system is observable through structured logs and Prometheus metrics.
 
-> Status: day 12 of the 12-day plan — feature complete and released as v1.0.0. Everything below
-> is implemented and tested, except where the *Out of scope for v1.0* list says otherwise.
+> Status: v1.1.0. The twelve day plan was released as v1.0.0; v1.1.0 adds a retry budget and
+> least connections by the power of two choices. Everything below is implemented and tested,
+> except where the *Out of scope* list says otherwise.
 
 ## Features
 
@@ -37,7 +38,7 @@ choose, and the whole system is observable through structured logs and Prometheu
 - **Shipped as a container**: a multi-stage build on a distroless base, running as a non-root
   user, published on every tag
 
-### Out of scope for v1.0
+### Out of scope
 
 - TLS termination and HTTP/2 — the balancer speaks plain HTTP
 - Distributed or multi-node balancing, and service discovery
