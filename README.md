@@ -193,8 +193,9 @@ implementation can be replaced without touching the packages that use it.
 - [Technical design](docs/technical-design/) — the design document the project was built to
   (architecture rationale, the twelve day plan, the production readiness criteria), and the notes
   for revising it now that the plan is finished, in Turkish and English.
-- [Development log](docs/development-log/) — one page per day: what was built, which decisions
-  were taken and why, what went wrong, and how the result was verified.
+- [Development log](docs/development-log/) — one page per day, and one for the work after the
+  release: what was built, which decisions were taken and why, what went wrong, and how the result
+  was verified.
 - [Performance report](docs/performance-report.md) — load testing method, the bottlenecks
   profiling exposed, and throughput and latency before and after each fix.
 - [Design deviations](docs/design-deviations.md) — every place the implementation departs from
@@ -207,6 +208,18 @@ implementation can be replaced without touching the packages that use it.
 Work goes straight to `main`, and CI runs on every push: gofmt, `go vet`, golangci-lint,
 govulncheck, build, and the full test suite under `-race`. Commit messages follow
 [Conventional Commits](https://www.conventionalcommits.org/).
+
+The suite includes two guards against the bottlenecks the profiling fixed: upstream connections
+must be reused, and forwarding must not allocate a copy buffer per request. Benchmarks cover the
+hot paths — selection, health lookups, rate limiting and forwarding:
+
+```bash
+go test -run '^$' -bench . -benchmem ./...
+```
+
+A separate workflow runs them on every push and compares them with the code before the push; the
+comparison is in the run's summary on GitHub. See the
+[performance report](docs/performance-report.md#keeping-the-fixes) for what they measure.
 
 ## License
 
