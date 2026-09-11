@@ -189,6 +189,42 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 6,
+      "title": "Retries",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ege-balancer-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(lb_retries_total[1m]))",
+          "legendFormat": "retries sent",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(lb_rejected_requests_total{reason=\"retry_budget_exhausted\"}[1m]))",
+          "legendFormat": "refused by the budget",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8
+          }
+        },
+        "overrides": []
+      }
     }
   ]
 }
