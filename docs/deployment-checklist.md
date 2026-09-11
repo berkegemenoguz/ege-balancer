@@ -24,6 +24,8 @@ first section follows the production readiness criteria in section 11 of the des
 - [ ] `golangci-lint run ./...` reports nothing
 - [ ] `govulncheck ./...` reports nothing
 - [ ] `docker build .` succeeds and the image still runs `-version`
+- [ ] The benchmarks run for the last push shows no change in bytes or allocations per operation
+      that the release does not explain, and no timing change well beyond runner noise
 - [ ] `docs/development-log/` has a page for the work in the release
 - [ ] The README status line matches what the release actually does
 - [ ] The version in the tag follows semantic versioning
