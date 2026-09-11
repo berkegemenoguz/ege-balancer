@@ -19,6 +19,8 @@ choose, and the whole system is observable through structured logs and Prometheu
   and rejoins when it recovers
 - **Configurable failure policies**: `retry_next_backend` (never twice to the same backend),
   `fail_fast`, and `circuit_breaker` with a half-open probe
+- **A retry budget**: retries in flight are capped at a share of the requests in flight, so a
+  failing pool is not sent several times its traffic at the moment it can least absorb it
 - **Resource protection**: per-IP rate limiting, a connection cap enforced at the listener, a
   request body limit, and timeouts on every phase of a request
 - **Request validation**: ambiguously framed requests are refused before a backend sees them,
@@ -136,6 +138,12 @@ applied.
 The numeric values in both are starting points. The [performance report](docs/performance-report.md)
 records what the load test says about them.
 
+Under `retry_next_backend`, `retry.max_retries` bounds the retries of one request and the retry
+budget bounds them across all requests: at most `retry.budget_percent` (default 20) of the
+requests in flight may be retries, and `retry.min_retry_concurrency` (default 3) are always
+allowed, so light traffic can still be retried. A retry the budget refuses is answered with 503
+and counted as `retry_budget_exhausted`. Both settings apply on reload.
+
 ## Observability
 
 The balancer serves two ports: proxied traffic on `listen_addr`, and observability on
@@ -143,7 +151,8 @@ The balancer serves two ports: proxied traffic on `listen_addr`, and observabili
 port is saturated, and neither path is taken away from the backends.
 
 - `/metrics` — Prometheus format: requests by backend and status, a latency histogram, backend
-  failures, rejected requests by reason, and live gauges for active connections and health
+  failures, retries sent, rejected requests by reason, and live gauges for active connections
+  and health
 - `/status` — a JSON summary for a person: algorithm, healthy count, applied reload count, and
   each backend's weight, health and active connections
 - `/debug/pprof/` — Go's profiling endpoints, served only when `enable_pprof` is set. They expose
