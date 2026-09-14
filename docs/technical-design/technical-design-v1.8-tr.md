@@ -197,6 +197,7 @@ gösterir.*
 ```
 cmd/lb/                    giriş noktası: yapılandırmayı okur, logger'ı kurar, uygulamayı çalıştırır
 cmd/demo/                  demo ortamını yönetmek için yerel konsol (imaja dahil değil)
+cmd/mockbackend/           demo ortamı için mock backend (imaja dahil değil)
 internal/app/              kurulum (wiring); binary ve entegrasyon testleri ortak kullanır
 internal/config/           ayrıştırma, varsayılanlar, doğrulama, yenileme kuralları
 internal/balancer/         Backend, LBStrategy arayüzü ve üç strateji
@@ -576,6 +577,35 @@ olmak üzere 137 test fonksiyonu ve 10 benchmark içerir. Paket bazında birim t
 Entegrasyon testleri yapılandırmalarını bir dosyaya yazar ve binary ile aynı yoldan yükler; böylece
 varsayılanlar ve doğrulama da diğer her şeyle birlikte sınanır.
 
+### 9.4 Demo ortamı
+
+v1.1.0'a kadar Compose ortamındaki on backend, her isteğe anında sabit bir metinle cevap veren
+`hashicorp/http-echo` idi. Buna bağlı üç şey bundan zarar gördü: least connections'ın dengeleyecek
+bir şeyi yoktu, yük testi on baytlık gövdeler iletti ve tüm backend'ler eşitti. Artık hepsi tek bir
+program, `cmd/mockbackend`, her backend için bir profille çalıştırılıyor:
+
+| Ayar | Anlamı |
+| --- | --- |
+| `latency`, `latency-p99` | bir isteğin servis süresinin medyanı ve 99. yüzdeliği; log-normal dağılımdan çekilir |
+| `capacity`, `queue` | aynı anda işlenen istekler ve bekleyebilecek istekler; kuyruğun ötesinde backend 503 döner |
+| `body-size` | ilk satırında backend'in adı bulunan yanıtın boyutu |
+| `error-rate` | 500 ile cevaplanan isteklerin payı |
+| `seed` | gecikme ve hata dizisini tekrarlanabilir kılar |
+
+Gecikme yalnızca istek bir işçi tutarken harcanır; böylece kapasitesi düşük bir backend, gerçek bir
+sunucu gibi, yük altında kuyruğu büyüdükçe yavaşlar ve `/healthz`'i kuyruk yarıdan fazla doluyken
+503 döner. Her backend kendini ayrıca bir `X-Backend` başlığında da adlandırır.
+
+| Backend'ler | Profil | Gecikme (medyan, p99) | Kapasite, kuyruk | Yanıt |
+| --- | --- | --- | --- | --- |
+| 1–6 | hızlı | 15 ms, 80 ms | 64, 128 | 4 KiB |
+| 7–8 | orta | 30 ms, 200 ms | 32, 64 | 4 KiB |
+| 9 | yavaş | 80 ms, 500 ms | 16, 32 | 4 KiB |
+| 10 | büyük yanıt | 15 ms, 80 ms | 64, 128 | 256 KiB |
+
+Entegrasyon testleri mock'u kullanmaz. Backend'lerini Go içinde kendileri kurar; orada bir test bir
+backend'i yavaşlatabilir, hata verdirebilir ya da öldürebilir.
+
 ---
 
 ## 10. Değerlendirme
@@ -782,9 +812,11 @@ bu yüzden yalnızca bayt ve bellek ayırma sayıları kapı olarak kullanılır
   sayılar görür; bu yüzden yavaş bir backend, üzerinde istekler birikene kadar eşit pay alır (§10.7).
 - **TLS sonlandırma ve HTTP/2** kapsam dışında kalmaya devam ediyor; yük dengeleyici düz HTTP/1.1
   konuşur.
-- **Demo'daki sağlık kontrolü** yalnızca bir erişilebilirlik kontrolüdür, çünkü `http-echo` her
-  yola 200 ile cevap verir; gerçek bir backend'in `/healthz`'i kendi bağımlılıklarını kontrol
-  etmelidir.
+- **Yük testi mock backend'lerden önce yapıldı.** §10.3'teki sayılar on baytlık gövde dönen basit
+  backend'lere karşı ölçüldü; bunları profilli mock backend'lere (§9.4) karşı tekrarlamak bir sonraki
+  ölçümdür.
+- **Daha büyük bir havuz.** Ortamda on backend var. Otuz gibi daha büyük havuzlar için bir üreteç,
+  power of two choices'ın taramayı geçtiği yerde ölçülmesini sağlar (§10.7).
 - **Tek düğüm.** Hız sınırları, devre durumu ve retry budget süreç başınadır; birkaç yük dengeleyici
   örneğinin her biri kendi sınırını uygular.
 - **Sticky session yok.** Backend'ler durumsuz olmalıdır.
@@ -910,6 +942,7 @@ Her maddenin gerekçesi [`docs/design-deviations.md`](../design-deviations.md) d
 | 10 | Gecikme hedefi yük cinsinden yeniden ifade edildi | 10.3 | §10.3 |
 | 11 | Hata stratejilerine bir retry budget eklendi | 5.5 | §6.5 |
 | 12 | Least connections taramak yerine rastgele iki backend'i karşılaştırır | 5.2 | §5.4, §10.7 |
+| 13 | Mock backend'ler `http-echo` değil, profilleri olan projeye ait bir programdır | 8 | §9.4 |
 | — | Epoll öğrenme egzersizi yapılmadı | 4.2 | §4.3 |
 
 ---
