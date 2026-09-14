@@ -1,7 +1,7 @@
 # Performance report
 
 Load testing and profiling of the load balancer, carried out on day 10 of the plan against the
-ten mock backends. It records the method, the two bottlenecks the measurements exposed, the
+ten mock backends. It records the method, the three bottlenecks the measurements exposed, the
 changes made in response, and the numbers before and after.
 
 ## Method
