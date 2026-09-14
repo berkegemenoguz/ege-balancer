@@ -41,3 +41,8 @@ jobs:
       # fail here rather than at release time.
       - name: Build the container image
         run: docker build --build-arg VERSION=ci -t ege-balancer:ci .
+
+      # The demo environment depends on the mock backend image, so it is built
+      # here too.
+      - name: Build the mock backend image
+        run: docker build -f deploy/mockbackend.Dockerfile -t ege-balancer-mock:ci .
