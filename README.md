@@ -52,16 +52,18 @@ choose, and the whole system is observable through structured logs and Prometheu
 
 ## Getting started
 
-Start the ten mock backends, plus Prometheus and Grafana:
+Start the ten mock backends, plus Prometheus and Grafana. The backends are one program,
+`cmd/mockbackend`, run with different profiles — six fast, two slower, one struggling and one
+returning large answers — so that the pool behaves like a real one:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-Each backend answers with its own name, so you can see which one served a request:
+Each backend answers with its own name, in an `X-Backend` header and on the first line of the body:
 
 ```bash
-curl localhost:5681
+curl -s localhost:5681 | head -1
 ```
 
 Build and run the balancer against them:
@@ -73,7 +75,7 @@ go build -o bin/lb ./cmd/lb && ./bin/lb -config configs/lb.localhost.yaml
 Send it some traffic and watch the distribution:
 
 ```bash
-for i in $(seq 20); do curl -s localhost:8080; echo; done | sort | uniq -c
+for i in $(seq 20); do curl -s -o /dev/null -w '%header{x-backend}\n' localhost:8080; done | sort | uniq -c
 ```
 
 Or drive all of it from one place — the [demo console](cmd/demo/) starts the stack and offers the
@@ -183,6 +185,7 @@ method, the bottlenecks and the before-and-after numbers.
 ```
 cmd/lb/                    entry point: reads configuration, builds the logger, runs the app
 cmd/demo/                  local console for driving the demo stack
+cmd/mockbackend/           mock backend for the demo environment: latency, capacity, answer size
 internal/app/              wiring, shared by the binary and the integration tests
 internal/config/           configuration parsing, defaults and validation
 internal/balancer/         LBStrategy interface and the three algorithms
