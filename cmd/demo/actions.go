@@ -129,7 +129,7 @@ func (e *environment) measure(ctx context.Context, count int) (map[string]int, m
 
 				mu.Lock()
 				statuses[response.StatusCode]++
-				bodies[strings.TrimSpace(string(body))]++
+				bodies[backendOf(response.Header, body)]++
 				mu.Unlock()
 			}
 		}()
@@ -137,6 +137,17 @@ func (e *environment) measure(ctx context.Context, count int) (map[string]int, m
 	wg.Wait()
 
 	return bodies, statuses, nil
+}
+
+// backendOf names the backend that answered. The mock backends say so in a
+// header, which holds whatever the body carries; the first line of the body
+// covers a backend that only answers with its name.
+func backendOf(header http.Header, body []byte) string {
+	if name := header.Get("X-Backend"); name != "" {
+		return name
+	}
+	first, _, _ := strings.Cut(string(body), "\n")
+	return strings.TrimSpace(first)
 }
 
 // showDistribution prints the measured distribution as a bar per backend.

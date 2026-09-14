@@ -150,7 +150,7 @@ func measureDistribution(ctx context.Context, con *console, env *environment, fl
 
 	resumed := flow.halt()
 
-	con.echo(fmt.Sprintf("for i in $(seq %d); do curl -s %s; echo; done | sort | uniq -c",
+	con.echo(fmt.Sprintf("for i in $(seq %d); do curl -s -o /dev/null -w '%%header{x-backend}\\n' %s; done | sort | uniq -c",
 		requests, env.trafficURL))
 
 	bodies, statuses, err := env.measure(ctx, requests)
