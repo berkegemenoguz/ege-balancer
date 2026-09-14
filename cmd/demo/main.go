@@ -102,7 +102,9 @@ func welcome(con *console, env *environment, current status) {
 	con.heading("Ege-Balancer demo console")
 	con.step("traffic      %s", env.trafficURL)
 	con.step("status       %s", env.statusURL)
-	con.step("grafana      http://localhost:3000/d/ege-balancer")
+	con.step("grafana      http://localhost:3000/d/ege-balancer            overview")
+	con.step("             http://localhost:3000/d/ege-balancer-backends   backends")
+	con.step("             http://localhost:3000/d/ege-balancer-resilience resilience")
 	con.step("prometheus   http://localhost:9090")
 	con.blank()
 	con.step("now: %s · %d/%d backends healthy · %d reloads applied",
