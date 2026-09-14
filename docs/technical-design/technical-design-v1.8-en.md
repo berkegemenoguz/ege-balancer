@@ -511,9 +511,17 @@ reloads applied, and each backend's weight, health and in-flight count. Logs are
 
 ### 8.3 Monitoring stack
 
-The Compose environment runs Prometheus, scraping every five seconds, and Grafana with a provisioned
-dashboard: request rate per backend, error and rejection rates, latency percentiles, in-flight
-requests per backend, health, and retries against budget refusals. Two resource findings from
+The Compose environment runs Prometheus, scraping every five seconds, and Grafana with three provisioned, linked dashboards. *Overview* is the one to keep on screen:
+headline figures, request rate and share of traffic per backend, latency and a health timeline.
+*Backends* compares the backends — a table, share of traffic, requests in flight averaged over a
+window, p95 latency per backend and a latency heatmap. *Resilience* shows what failures do:
+answers by status class, refusals by reason, retries against the budget and reloads.
+
+Three choices make them readable. Every graph marks configuration reloads, so the effect of a
+change is seen against the moment it was made. Each backend keeps the colour of its profile
+(§9.4). And the in-flight gauge is shown averaged: sampled every five seconds at light load it
+reads mostly 0 or 1, which says nothing about how busy a backend is. The dashboards are generated
+by a script, so the three stay consistent. Two resource findings from
 running it are recorded in Appendix B (entry 7): Grafana needs a Go memory budget (`GOMEMLIMIT`)
 rather than a larger limit, and Prometheus fits its 256 MB.
 
