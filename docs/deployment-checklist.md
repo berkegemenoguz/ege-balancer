@@ -50,7 +50,7 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
       when they start failing, and `retry.min_retry_concurrency` covers the quietest traffic
 - [ ] `enable_pprof` is false, or the metrics port is unreachable from outside
 - [ ] The metrics port is not exposed publicly
-- [ ] Prometheus is scraping the balancer and the Grafana dashboard shows data
+- [ ] Prometheus is scraping the balancer and the three Grafana dashboards show data
 
 ## After deploying
 
