@@ -2,6 +2,7 @@
 .github
 bin
 cmd/demo
+cmd/mockbackend
 deploy
 docs
 *.md
