@@ -516,9 +516,18 @@ metrik portunda sunulur.
 
 ### 8.3 İzleme yığını
 
-Compose ortamı, beş saniyede bir scrape eden Prometheus'u ve hazır bir dashboard'lu Grafana'yı
-çalıştırır: backend başına istek oranı, hata ve ret oranları, gecikme yüzdelikleri, backend başına
-uçuştaki istekler, sağlık ve budget retlerine karşı retry'lar. Bu yığını çalıştırmaktan çıkan iki
+Compose ortamı, beş saniyede bir scrape eden Prometheus'u ve birbirine bağlı üç hazır dashboard'lu Grafana'yı çalıştırır. *Overview* ekranda açık tutulacak
+olandır: öne çıkan değerler, backend başına istek oranı ve trafik payı, gecikme ve bir sağlık
+şeridi. *Backends* backend'leri karşılaştırır — bir tablo, trafik payı, bir pencere üzerinden
+ortalanmış uçuştaki istekler, backend başına p95 gecikme ve bir gecikme ısı haritası.
+*Resilience* hataların etkisini gösterir: durum sınıfına göre yanıtlar, nedenlerine göre retler,
+budget'a karşı retry'lar ve yenilemeler.
+
+Üç seçim onları okunur kılar. Her grafik yapılandırma yenilemelerini işaretler; böylece bir
+değişikliğin etkisi yapıldığı ana göre görülür. Her backend profilinin rengini korur (§9.4). Ve
+uçuştaki istek göstergesi ortalanmış gösterilir: hafif yükte beş saniyede bir örneklendiğinde çoğu
+zaman 0 ya da 1 okunur ve bir backend'in ne kadar meşgul olduğu hakkında bir şey söylemez.
+Dashboard'lar bir betikle üretilir, böylece üçü tutarlı kalır. Bu yığını çalıştırmaktan çıkan iki
 kaynak bulgusu Ek B'de (7. madde) kayıtlıdır: Grafana daha yüksek bir sınır yerine bir Go bellek
 bütçesine (`GOMEMLIMIT`) ihtiyaç duyar; Prometheus 256 MB'a sığar.
 
