@@ -227,3 +227,23 @@ Requests arriving together also read the same counters and piled onto the same b
 samples remove both, cost 14 ns whatever the pool size where the scan grew to 484 ns at a thousand
 backends, and still keep a slow backend avoided under sustained load: 6 to 11 of 200 requests,
 against 7 for the scan.
+
+---
+
+## 13. The mock backends are a program of the project, not http-echo
+
+**Section 8.** After v1.1.
+
+The document uses `hashicorp/http-echo`, which answers every request at once with a fixed text.
+
+**What is done instead:** `cmd/mockbackend`, one small program run as all ten backends with
+different profiles: a log-normal latency set by its median and 99th percentile, a capacity with a
+bounded queue beyond which it answers 503, an answer size and an error rate. The compose file gives
+six backends a fast profile, two a slower one with less capacity, one a struggling one and one large
+answers. Every backend still answers with its name, now also in an `X-Backend` header.
+
+**Why:** `http-echo` answered in microseconds with ten bytes, and three results depended on it.
+Least connections could not be shown in the demo, because nothing was ever in flight; the load test
+measured forwarding with a ten byte body; and every backend was equal, so neither weights nor
+differences in capacity were ever exercised. Its health check was also only a reachability check:
+the mock reports itself unhealthy while its queue is more than half full.
