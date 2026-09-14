@@ -1,66 +1,99 @@
 # Mock backend environment for development and testing.
-# Each backend answers every request with its own identity, which makes the
-# distribution behaviour of the load balancing algorithms observable.
+#
+# The ten backends are one program, cmd/mockbackend, run with different
+# profiles so that the pool behaves like a real one: most backends are fast,
+# two are slower with less capacity, one is struggling, and one returns large
+# answers. Every backend answers with its own name, in an X-Backend header and
+# on the first line of the body, which keeps the distribution of the balancing
+# algorithms observable.
+
+x-mock: &mock
+  build:
+    context: ..
+    dockerfile: deploy/mockbackend.Dockerfile
+  image: ege-balancer-mock
+  mem_limit: 32m
+
+# Latency is the median and the 99th percentile of the time a request takes
+# once a worker has picked it up; waiting in the queue comes on top of it.
+# Beyond the queue a backend answers 503 at once, as an overloaded server would.
+x-fast: &fast
+  MOCK_LATENCY: 15ms
+  MOCK_LATENCY_P99: 80ms
+  MOCK_CAPACITY: "64"
+  MOCK_QUEUE: "128"
+  MOCK_BODY_SIZE: 4KiB
+
+x-medium: &medium
+  MOCK_LATENCY: 30ms
+  MOCK_LATENCY_P99: 200ms
+  MOCK_CAPACITY: "32"
+  MOCK_QUEUE: "64"
+  MOCK_BODY_SIZE: 4KiB
+
+x-slow: &slow
+  MOCK_LATENCY: 80ms
+  MOCK_LATENCY_P99: 500ms
+  MOCK_CAPACITY: "16"
+  MOCK_QUEUE: "32"
+  MOCK_BODY_SIZE: 4KiB
+
+x-large: &large
+  MOCK_LATENCY: 15ms
+  MOCK_LATENCY_P99: 80ms
+  MOCK_CAPACITY: "64"
+  MOCK_QUEUE: "128"
+  MOCK_BODY_SIZE: 256KiB
 
 services:
   backend-1:
-    image: hashicorp/http-echo
-    command: ["-text=backend-1", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *fast, MOCK_NAME: backend-1 }
     ports: ["5681:5678"]
 
   backend-2:
-    image: hashicorp/http-echo
-    command: ["-text=backend-2", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *fast, MOCK_NAME: backend-2 }
     ports: ["5682:5678"]
 
   backend-3:
-    image: hashicorp/http-echo
-    command: ["-text=backend-3", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *fast, MOCK_NAME: backend-3 }
     ports: ["5683:5678"]
 
   backend-4:
-    image: hashicorp/http-echo
-    command: ["-text=backend-4", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *fast, MOCK_NAME: backend-4 }
     ports: ["5684:5678"]
 
   backend-5:
-    image: hashicorp/http-echo
-    command: ["-text=backend-5", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *fast, MOCK_NAME: backend-5 }
     ports: ["5685:5678"]
 
   backend-6:
-    image: hashicorp/http-echo
-    command: ["-text=backend-6", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *fast, MOCK_NAME: backend-6 }
     ports: ["5686:5678"]
 
   backend-7:
-    image: hashicorp/http-echo
-    command: ["-text=backend-7", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *medium, MOCK_NAME: backend-7 }
     ports: ["5687:5678"]
 
   backend-8:
-    image: hashicorp/http-echo
-    command: ["-text=backend-8", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *medium, MOCK_NAME: backend-8 }
     ports: ["5688:5678"]
 
   backend-9:
-    image: hashicorp/http-echo
-    command: ["-text=backend-9", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *slow, MOCK_NAME: backend-9 }
     ports: ["5689:5678"]
 
   backend-10:
-    image: hashicorp/http-echo
-    command: ["-text=backend-10", "-listen=:5678"]
-    mem_limit: 32m
+    <<: *mock
+    environment: { <<: *large, MOCK_NAME: backend-10 }
     ports: ["5690:5678"]
 
   loadbalancer:
