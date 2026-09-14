@@ -200,3 +200,69 @@ backends; the paper states it.
 | Slow backend, one burst of 60 | 16 of 60 | 16–20 of 60 |
 
 The integration tests ran 20 times on two CPUs under `-race`. Coverage of `balancer` stayed at 100%.
+
+## Mock backends
+
+**Why.** The ten backends of the demo environment were `hashicorp/http-echo`, which answers every
+request in microseconds with a few bytes. That had cost three things already: least connections
+could not be shown in the demo, because nothing was ever in flight; the load test forwarded ten-byte
+bodies; and every backend was equal, so differences in capacity were never exercised.
+
+### What was built
+
+- `cmd/mockbackend`, one program run as all ten backends, each with a profile: a log-normal latency
+  given by its median and 99th percentile, a capacity with a bounded queue beyond which it answers
+  503, an answer size, an error rate and a seed.
+- `/healthz` answering 503 while more than half of the queue is waiting, and an `X-Backend` header
+  naming the backend on every answer.
+- An image of its own, `deploy/mockbackend.Dockerfile`, with an ignore file that sends only
+  `go.mod` and the mock's package as build context; CI builds it beside the balancer's image.
+- A compose file giving six backends a fast profile, two a slower one with less capacity, one a
+  struggling one and one large answers.
+- The demo console counting the distribution from the `X-Backend` header.
+
+### Decisions
+
+**One program, many profiles.** Every backend runs the same image; they differ only in settings,
+which the compose file shares through YAML anchors and environment variables. Changing a scenario is
+a line in the compose file, not code.
+
+**Latency is spent holding a worker.** A request waits for a worker first and is then "served".
+That makes a backend with little capacity slow down as its queue grows, which is how a real server
+behaves and what gives least connections something to balance.
+
+**Log-normal latency.** Real service times have a long tail, and the median and the 99th percentile
+are the two numbers people actually know about a service; together they fix a log-normal
+distribution.
+
+**The integration tests keep their own backends.** They need a backend they can slow down, fail or
+kill in the middle of a test, and they run without Docker; the mock is for the environment.
+
+**Ten backends, for now.** A pool of thirty was considered. It would help measure where the power of
+two choices overtakes the scan, but would make the dashboard and the demo unreadable and break the
+comparison with every earlier measurement. It is recorded as future work, with a generator for the
+compose file and configurations rather than thirty hand-written services.
+
+### What went wrong
+
+**The distribution was counted from the body.** The demo console took the whole answer as the
+backend's name, which a 4 KiB body breaks. It now reads the `X-Backend` header, and the body still
+begins with the name so that a person using `curl` sees who answered.
+
+### Verification
+
+Unit tests cover the latency distribution — over 100,000 draws the median within 5% and the 99th
+percentile within 10% of the profile — the queue and capacity, a client leaving the queue, health
+under overload, the error rate and flag parsing; coverage of the package is 80%.
+
+The environment was brought up with `docker compose up --build`:
+
+| Check | Result |
+| --- | --- |
+| Build context of the mock image | 23.6 kB; the image is 15.1 MB |
+| Pool as the balancer sees it | 10 of 10 healthy |
+| Capacity 2 and queue 2, 20 requests at once, run outside Docker | 4 answered, 16 refused with 503 |
+| Median time through the balancer, round robin | fast 14–21 ms, medium 34–41 ms, slow 100 ms (max 753 ms), large answers 15 ms |
+| Answer size of the large profile | 262,144 bytes |
+| Memory under load | 7–10 MiB per backend against a 32 MiB limit |
+| Stopping a backend | exits 0.07 s after SIGTERM |
