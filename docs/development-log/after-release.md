@@ -266,3 +266,59 @@ The environment was brought up with `docker compose up --build`:
 | Answer size of the large profile | 262,144 bytes |
 | Memory under load | 7–10 MiB per backend against a 32 MiB limit |
 | Stopping a backend | exits 0.07 s after SIGTERM |
+
+## Grafana dashboards
+
+**Why.** Watching the demo with the new mock backends showed how much the single dashboard hid or
+misled. The error panel said "No data" when there were simply no errors. The request rate axis
+started at 1.98, turning a one-request wobble into a spike. The in-flight gauge, sampled every five
+seconds, jumped between 0 and 1 and said nothing about which backend was busy. Backends shared
+colours, so the slow one could not be picked out. And the latency histogram, which is recorded per
+backend, was never shown per backend.
+
+### What was built
+
+- Three linked dashboards in an *Ege-Balancer* folder: *Overview* for the screen during a demo,
+  *Backends* for comparing them, *Resilience* for what failures do.
+- On every graph, markers for applied and rejected configuration reloads.
+- A colour per backend following its profile, a backend selector and a window selector.
+- `deploy/grafana/generate_dashboards.py`, which writes all three.
+
+### Decisions
+
+**Three dashboards, not one long page.** The overview has to fit a screen while someone talks over
+it; the detail belongs a click away.
+
+**Generated, not hand-written.** Three dashboards share colours, variables, annotations and panel
+styling. Kept in step by hand, they would drift within a few edits. The script uses only the
+Python standard library, and the JSON it writes is what Grafana provisions.
+
+**Averages over raw gauges.** Requests in flight are shown as `avg_over_time` over the selected
+window. The raw gauge is correct but, sampled every five seconds at light load, it is noise.
+
+**Zero where there is nothing.** Totals that can be absent — refusals, 5xx, retries — fall back to
+`vector(0)`, so a quiet system draws a line at zero instead of an empty panel.
+
+### What went wrong
+
+**The first measurement of least connections was read from a noisy graph.** On the old dashboard
+the per-backend lines after switching algorithm looked like random divergence. Reading the same
+data from Prometheus over the whole window showed the slow backend taking the smallest share and
+the in-flight averages ranked by profile. Both views are now panels.
+
+**The folder did not apply to a running Grafana.** Grafana created the *Ege-Balancer* folder
+but left the dashboards it had already provisioned in *General*, and restarting it did not move
+them: its database lives in the container's anonymous volume and survives restarts. A throwaway
+Grafana started with the same provisioning and an empty database put all three in the folder, so
+a new environment is right; an existing one needs its Grafana volume renewed once.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Every query of the three dashboards, run against Prometheus | 43 queries, no errors |
+| Provisioning | all three loaded; no provisioning errors in Grafana's log |
+| Requests stat against the demo's sustained traffic | 20.0 req/s |
+| Backends table, sorted by p95 | the slow backend first |
+| The generator, run again | identical JSON |
+| A fresh Grafana with the same provisioning | all three dashboards in the *Ege-Balancer* folder |
