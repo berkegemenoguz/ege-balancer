@@ -155,11 +155,7 @@ func measureDistribution(ctx context.Context, con *console, env *environment, fl
 	con.echo(fmt.Sprintf("for i in $(seq %d); do curl -s -o /dev/null -w '%%header{x-backend}\\n' %s; done | sort | uniq -c",
 		requests, env.trafficURL))
 
-	bodies, statuses, err := env.measure(ctx, requests)
-	if err != nil {
-		con.fail("%v", err)
-		return
-	}
+	bodies, statuses := env.measure(ctx, requests)
 	con.showDistribution(bodies, statuses, requests)
 
 	if resumed {
@@ -273,7 +269,7 @@ func demonstrateRateLimit(ctx context.Context, con *console, env *environment, f
 	}
 
 	before := served()
-	_, statuses, _ := env.measure(ctx, burst)
+	_, statuses := env.measure(ctx, burst)
 	reached := served() - before
 
 	con.blank()
@@ -289,7 +285,7 @@ func demonstrateRateLimit(ctx context.Context, con *console, env *environment, f
 	con.blank()
 	con.step("after one second of quiet")
 	time.Sleep(time.Second)
-	_, statuses, _ = env.measure(ctx, limit)
+	_, statuses = env.measure(ctx, limit)
 	con.ok("%d answered by a backend", statuses[http.StatusOK])
 
 	if err := env.setRateLimit(ctx, con, previous); err != nil {

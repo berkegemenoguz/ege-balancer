@@ -92,7 +92,7 @@ func (t *traffic) once() {
 // measure sends count requests and reports which backend answered each one.
 // The distribution comes from the responses themselves, so it is what the
 // client saw rather than what a counter says.
-func (e *environment) measure(ctx context.Context, count int) (map[string]int, map[int]int, error) {
+func (e *environment) measure(ctx context.Context, count int) (map[string]int, map[int]int) {
 	const workers = 8
 
 	var (
@@ -136,7 +136,7 @@ func (e *environment) measure(ctx context.Context, count int) (map[string]int, m
 	}
 	wg.Wait()
 
-	return bodies, statuses, nil
+	return bodies, statuses
 }
 
 // backendOf names the backend that answered. The mock backends say so in a
@@ -171,7 +171,7 @@ func (c *console) showDistribution(bodies map[string]int, statuses map[int]int, 
 		}
 		label := name
 		if label == "" {
-			label = "(no body)"
+			label = "(unnamed)"
 		}
 		c.printf("  %-14s %s %d\n", label, c.paint(strings.Repeat("█", width), sgrGreen), count)
 	}
