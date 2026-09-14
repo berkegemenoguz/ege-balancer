@@ -193,6 +193,7 @@ and out of it.*
 ```
 cmd/lb/                    entry point: reads configuration, builds the logger, runs the app
 cmd/demo/                  local console for driving the demo stack (not part of the image)
+cmd/mockbackend/           mock backend for the demo environment (not part of the image)
 internal/app/              wiring, shared by the binary and the integration tests
 internal/config/           parsing, defaults, validation, reload rules
 internal/balancer/         Backend, the LBStrategy interface and the three strategies
@@ -570,6 +571,35 @@ on real sockets, and 10 benchmarks. Unit coverage by package:
 The integration tests write their configuration to a file and load it through the same path as the
 binary, so defaults and validation are exercised with everything else.
 
+### 9.4 The demo environment
+
+Up to v1.1.0 the ten backends of the Compose environment were `hashicorp/http-echo`, which answers
+every request at once with a fixed text. Three things depended on that and suffered for it: least
+connections had nothing to balance, the load test forwarded ten-byte bodies, and every backend was
+equal. They are now one program, `cmd/mockbackend`, run with a profile per backend:
+
+| Setting | Meaning |
+| --- | --- |
+| `latency`, `latency-p99` | median and 99th percentile of the time a request is served, drawn from a log-normal distribution |
+| `capacity`, `queue` | requests served at once, and requests that may wait; beyond the queue the backend answers 503 |
+| `body-size` | size of the answer, with the backend's name on its first line |
+| `error-rate` | share of requests answered with 500 |
+| `seed` | makes the sequence of latencies and failures repeatable |
+
+Latency is spent only while a request holds a worker, so a backend with little capacity slows down
+under load as its queue grows, the way a real server does; its `/healthz` answers 503 while the
+queue is more than half full. Every backend also names itself in an `X-Backend` header.
+
+| Backends | Profile | Latency (median, p99) | Capacity, queue | Answer |
+| --- | --- | --- | --- | --- |
+| 1–6 | fast | 15 ms, 80 ms | 64, 128 | 4 KiB |
+| 7–8 | medium | 30 ms, 200 ms | 32, 64 | 4 KiB |
+| 9 | slow | 80 ms, 500 ms | 16, 32 | 4 KiB |
+| 10 | large answers | 15 ms, 80 ms | 64, 128 | 256 KiB |
+
+The integration tests do not use the mock. They build their own backends in Go, where a test can
+slow one down, make it fail or kill it.
+
 ---
 
 ## 10. Evaluation
@@ -771,8 +801,11 @@ CI runners vary by several per cent, which is why only bytes and allocations are
 - **Least connections in a burst.** When many requests arrive at once, most selections see equal
   counts, so a slow backend receives an even share until requests build up on it (§10.7).
 - **TLS termination and HTTP/2** remain out of scope; the balancer speaks plain HTTP/1.1.
-- **Health checking in the demo** is only a reachability check, since `http-echo` answers every
-  path with 200; a real backend's `/healthz` should check its own dependencies.
+- **The load test predates the mock backends.** The figures in §10.3 were measured against trivial
+  backends with a ten-byte body; repeating them against the profiled mock backends (§9.4) is the
+  next measurement.
+- **A larger pool.** The environment has ten backends. A generator for larger pools, such as thirty,
+  would let the power of two choices be measured where it overtakes the scan (§10.7).
 - **Single node.** Rate limits, circuit state and the retry budget are per process; several balancer
   instances would each enforce their own.
 - **No sticky sessions.** Backends must be stateless.
@@ -897,6 +930,7 @@ The reasoning for each entry is in [`docs/design-deviations.md`](../design-devia
 | 10 | The latency target is restated in terms of load | 10.3 | §10.3 |
 | 11 | A retry budget was added to the failure policies | 5.5 | §6.5 |
 | 12 | Least connections compares two random backends instead of scanning | 5.2 | §5.4, §10.7 |
+| 13 | The mock backends are a program of the project with profiles, not `http-echo` | 8 | §9.4 |
 | — | The epoll learning exercise was not carried out | 4.2 | §4.3 |
 
 ---
