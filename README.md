@@ -1,42 +1,54 @@
 # Ege-Balancer
 
-A modular, high-performance HTTP reverse proxy and load balancer written in Go.
+A modular HTTP reverse proxy and load balancer written in Go.
 
-Incoming HTTP traffic is distributed across multiple backends using a configurable strategy,
-unhealthy backends are taken out of the pool automatically, failures are handled by a policy you
-choose, and the whole system is observable through structured logs and Prometheus metrics.
+Incoming HTTP traffic is spread across a pool of backends by a strategy you choose, unhealthy
+backends leave the pool on their own and come back when they recover, failures are handled by a
+policy you choose, and the whole system can be watched through structured logs, Prometheus metrics
+and Grafana dashboards.
 
 > Status: v1.1.0. The twelve day plan was released as v1.0.0; v1.1.0 adds a retry budget and
 > least connections by the power of two choices. Everything below is implemented and tested,
-> except where the *Out of scope* list says otherwise.
+> except where *Out of scope* says otherwise.
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Quick start: the demo console](#quick-start-the-demo-console)
+- [Running it by hand](#running-it-by-hand)
+- [Tests and benchmarks](#tests-and-benchmarks)
+- [Configuration](#configuration)
+- [Observability](#observability)
+- [Performance](#performance)
+- [Project layout](#project-layout)
+- [Documentation](#documentation)
+- [Development](#development)
+- [License](#license)
 
 ## Features
 
-- **Three load balancing algorithms**, selectable from configuration: round robin, least
-  connections (the less busy of two backends drawn at random, so its cost does not grow with the
-  pool and idle backends share the traffic), and weighted round robin (smooth, so a heavy
-  backend's turns are spread across the cycle rather than bunched together)
-- **Health checking**, active and passive: a periodic HTTP probe, plus the outcome of real
-  traffic, feeding the same consecutive-failure thresholds. An unhealthy backend leaves the pool
-  and rejoins when it recovers
-- **Configurable failure policies**: `retry_next_backend` (never twice to the same backend),
-  `fail_fast`, and `circuit_breaker` with a half-open probe
+- **Three load balancing algorithms**, chosen in configuration: round robin; least connections,
+  which sends each request to the less busy of two backends drawn at random, so its cost does not
+  grow with the pool and idle backends share the traffic; and smooth weighted round robin, which
+  spreads a heavy backend's turns across the cycle rather than bunching them together
+- **Health checking**, active and passive: a periodic HTTP probe and the outcome of real traffic
+  feed the same thresholds, so a backend leaves the pool as soon as either shows it failing
+- **Failure policies**: `retry_next_backend` (never twice to the same backend), `fail_fast`, and
+  `circuit_breaker` with a half-open probe
 - **A retry budget**: retries in flight are capped at a share of the requests in flight, so a
   failing pool is not sent several times its traffic at the moment it can least absorb it
-- **Resource protection**: per-IP rate limiting, a connection cap enforced at the listener, a
-  request body limit, and timeouts on every phase of a request
-- **Request validation**: ambiguously framed requests are refused before a backend sees them,
-  and `X-Forwarded-For` is rewritten so a client cannot forge its own address
-- **Graceful shutdown**: on SIGINT or SIGTERM the balancer stops accepting connections and lets
-  the requests already in flight finish
-- **Configuration reload on SIGHUP**: backends, weights, algorithm, failure policy and limits
-  change without dropping a connection; an invalid file is refused and the balancer keeps
-  running on what it had
-- **Observability**: structured JSON logs, Prometheus metrics, a JSON status endpoint, and
-  optional profiling endpoints
-
-- **Shipped as a container**: a multi-stage build on a distroless base, running as a non-root
-  user, published on every tag
+- **Resource protection**: per-client rate limiting, a connection cap, a request body limit, and a
+  timeout on every phase of a request
+- **Request validation**: ambiguously framed requests are refused before a backend sees them, and
+  `X-Forwarded-For` is rewritten so a client cannot forge its own address
+- **Graceful shutdown** on SIGINT or SIGTERM, letting requests already in flight finish
+- **Configuration reload on SIGHUP** without dropping a connection; an invalid file is refused and
+  the balancer keeps running on what it had
+- **Observability**: structured logs, Prometheus metrics, a JSON status endpoint, optional
+  profiling endpoints, and three Grafana dashboards
+- **Shipped as a container**: a 22.6 MB distroless image running as a non-root user, published on
+  every tag
 
 ### Out of scope
 
@@ -46,63 +58,140 @@ choose, and the whole system is observable through structured logs and Prometheu
 
 ## Requirements
 
-- Go 1.27 or newer
-- Docker with Compose, for the mock backend environment and the monitoring stack. Not needed to
-  build, test or run the balancer itself.
+- **Go 1.27** or newer, to build, test and run everything
+- **Docker with Compose**, for the demo environment: ten mock backends, the balancer, Prometheus
+  and Grafana. Docker Desktop needs about 4 GB of memory for the whole stack. The balancer itself
+  and its tests do not need Docker.
+- **curl 7.84** or newer for the distribution command below, which reads a response header
 
-## Getting started
+## Quick start: the demo console
 
-Start the ten mock backends, plus Prometheus and Grafana. The backends are one program,
-`cmd/mockbackend`, run with different profiles — six fast, two slower, one struggling and one
-returning large answers — so that the pool behaves like a real one:
-
-```bash
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-Each backend answers with its own name, in an `X-Backend` header and on the first line of the body:
-
-```bash
-curl -s localhost:5681 | head -1
-```
-
-Build and run the balancer against them:
-
-```bash
-go build -o bin/lb ./cmd/lb && ./bin/lb -config configs/lb.localhost.yaml
-```
-
-Send it some traffic and watch the distribution:
-
-```bash
-for i in $(seq 20); do curl -s -o /dev/null -w '%header{x-backend}\n' localhost:8080; done | sort | uniq -c
-```
-
-Or drive all of it from one place — the [demo console](cmd/demo/) starts the stack and offers the
-same actions as menu entries, printing the command behind each one:
+The quickest way to see the balancer working is the demo console, a menu that runs in your
+terminal. From the repository root:
 
 ```bash
 go run ./cmd/demo
 ```
 
-Run the tests:
+It checks that Docker is running, starts the whole environment with
+`docker compose up -d --build`, and waits until the balancer reports all ten backends healthy. The
+first run builds the images and can take a few minutes; later runs start in seconds. Then it
+offers the actions you would otherwise type by hand:
 
-```bash
-go test -race -cover ./...
+```
+Actions
+  1  start or stop sustained traffic
+  2  measure the distribution over 30 requests
+  3  stop a backend            4  start a backend
+  5  change the algorithm      6  demonstrate the rate limit
+  7  show the status           r  reset everything
+  q  quit                      ?  show this again
 ```
 
-That includes `internal/integration`, which starts the balancer on real sockets against mock
-backends and drives it over HTTP. It needs no Docker and runs in CI with everything else.
+The prompt shows the algorithm in force and whether traffic is flowing, so a change made several
+actions ago cannot quietly make the next measurement look wrong:
 
-## Running in Docker
+```
+[least_connections · traffic on] action?
+```
 
-The whole environment, balancer included, comes up together:
+A good first tour:
+
+1. Press `1` to start traffic of about 20 requests a second, and open the
+   [Overview dashboard](http://localhost:3000/d/ege-balancer) — Grafana needs no login.
+2. Press `2` to measure which backend answered each of 30 requests.
+3. Press `5` and choose least connections. The reload appears as a marker on every graph, and on
+   the [Backends dashboard](http://localhost:3000/d/ege-balancer-backends) the slow backend's share
+   of traffic starts to fall.
+4. Press `3` and stop a backend. Its health timeline turns red after three failed checks, and the
+   traffic moves to the others; `4` brings it back.
+5. Press `6` to watch the rate limit refuse a burst and let a second one through after it refills.
+
+Every action prints the command it runs before running it, so anything the console does can be
+repeated by hand. The algorithm and rate limit actions edit `configs/lb.example.yaml` and send
+SIGHUP; `r` restores the file at any time, and `q` restores it on the way out and then asks
+whether to stop the stack. The [console's own page](cmd/demo/) has the details.
+
+It is a development tool: it drives Docker on your machine and never listens on a socket. It is
+not part of the container image.
+
+### The mock backends
+
+The ten backends are one program, `cmd/mockbackend`, run with different profiles so that the pool
+behaves like a real one rather than answering everything at once:
+
+| Backends | Profile | Latency (median, p99) | Capacity, queue | Answer |
+| --- | --- | --- | --- | --- |
+| 1–6 | fast | 15 ms, 80 ms | 64, 128 | 4 KiB |
+| 7–8 | medium | 30 ms, 200 ms | 32, 64 | 4 KiB |
+| 9 | slow | 80 ms, 500 ms | 16, 32 | 4 KiB |
+| 10 | large answers | 15 ms, 80 ms | 64, 128 | 256 KiB |
+
+A request waits for a worker and holds it while it is served, so a backend with little capacity
+slows down under load as its queue grows; beyond the queue it answers 503. Each backend names
+itself in an `X-Backend` header and on the first line of its answer, and they are published on
+ports 5681 to 5690:
+
+```bash
+curl -s localhost:5689 | head -1
+```
+
+The profiles live in `deploy/docker-compose.yml`; every setting is a flag or a `MOCK_` environment
+variable, listed by `go run ./cmd/mockbackend -h`.
+
+## Running it by hand
+
+### Everything in Docker
+
+The same environment the console starts:
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-Or run a published image against your own configuration:
+The balancer serves traffic on port 8080 and its status on 8081:
+
+```bash
+curl -s localhost:8081/status
+```
+
+Send it traffic and count which backend answered:
+
+```bash
+for i in $(seq 20); do curl -s -o /dev/null -w '%header{x-backend}\n' localhost:8080; done | sort | uniq -c
+```
+
+Edit `configs/lb.example.yaml`, which the container reads, and apply it without a restart:
+
+```bash
+docker compose -f deploy/docker-compose.yml kill -s HUP loadbalancer
+```
+
+Compose reports "Killed" for any signal it sends; the balancer keeps running. Stop everything with:
+
+```bash
+docker compose -f deploy/docker-compose.yml down
+```
+
+### The balancer on your machine
+
+To run the balancer from source against the same backends — to debug it, or to try a change
+without rebuilding the image — stop the container first, because both listen on ports 8080 and
+8081:
+
+```bash
+docker compose -f deploy/docker-compose.yml stop loadbalancer
+```
+
+```bash
+go build -o bin/lb ./cmd/lb && ./bin/lb -config configs/lb.localhost.yaml
+```
+
+`configs/lb.localhost.yaml` addresses the backends on their published ports. Reload it with
+`kill -HUP $(pgrep -f 'bin/lb')`. Prometheus keeps scraping the container, so the dashboards stay
+empty until `deploy/prometheus.yml` is pointed at the host, as the comments in that file explain.
+
+### A published image
 
 ```bash
 docker run --rm -p 8080:8080 -p 8081:8081 \
@@ -110,76 +199,83 @@ docker run --rm -p 8080:8080 -p 8081:8081 \
   ghcr.io/berkegemenoguz/ege-balancer:latest
 ```
 
-The image contains the binary and nothing else — no shell, no package manager — and runs as a
-non-root user. Because there is no shell in it, a container healthcheck is not defined; `/status`
-on the metrics port serves that purpose from outside.
+The image holds the binary and nothing else — no shell, no package manager. Without a shell there
+is nothing to run a container healthcheck with; `/status` on port 8081 serves that purpose from
+outside.
+
+## Tests and benchmarks
+
+```bash
+go test -race -cover ./...
+```
+
+That includes `internal/integration`, which starts the assembled balancer on real sockets and
+drives it over HTTP; it needs no Docker. The suite also guards the fixes the load test led to:
+upstream connections must be reused, and forwarding must not allocate a copy buffer per request.
+
+Benchmarks cover the hot paths — selection, health lookups, rate limiting, the retry budget and
+forwarding:
+
+```bash
+go test -run '^$' -bench . -benchmem ./...
+```
+
+CI runs them on every push and compares them with the code before the push; the comparison is in
+the run's summary on GitHub.
 
 ## Configuration
 
 Two configurations ship with the project, both documenting the full schema:
 
-- `configs/lb.example.yaml` — backends addressed by their compose service names. Use it when the
-  balancer runs inside the compose network.
-- `configs/lb.localhost.yaml` — the same, with the backends addressed on the loopback ports the
-  compose file publishes. Use it when the balancer runs on the host, which is how development
-  works today.
+- `configs/lb.example.yaml` — backends addressed by their compose service names, for the balancer
+  running in Docker. The demo console edits this one.
+- `configs/lb.localhost.yaml` — the same, with the backends on their published ports, for the
+  balancer running on your machine.
 
-Copy either to `configs/lb.yaml` for local changes; that path is gitignored.
+Copy either to `configs/lb.yaml` for changes of your own; that path is ignored by git.
 
-Send `SIGHUP` to reload the file without restarting:
-
-```bash
-kill -HUP $(pgrep -f 'bin/lb')
-```
-
-Backends, weights, the algorithm, the failure policy, health check settings and the limits are
-applied straight away. Settings bound to a socket — `listen_addr`, `metrics_addr`,
-`max_connections`, the timeouts and `enable_pprof` — need a restart; a reload applies everything
-else and logs which settings it left alone. An invalid file is refused in full, and the balancer
-carries on with the configuration it already had. `/status` reports how many reloads have been
-applied.
-
-The numeric values in both are starting points. The [performance report](docs/performance-report.md)
-records what the load test says about them.
+A reload on SIGHUP applies backends, weights, the algorithm, the failure policy, health checking,
+the retry budget and the limits straight away. Settings bound to a socket — `listen_addr`,
+`metrics_addr`, `max_connections`, the timeouts and `enable_pprof` — need a restart; a reload
+applies everything else and logs which settings it left alone. An invalid file is refused in full,
+and `/status` reports how many reloads have been applied.
 
 Under `retry_next_backend`, `retry.max_retries` bounds the retries of one request and the retry
-budget bounds them across all requests: at most `retry.budget_percent` (default 20) of the
-requests in flight may be retries, and `retry.min_retry_concurrency` (default 3) are always
-allowed, so light traffic can still be retried. A retry the budget refuses is answered with 503
-and counted as `retry_budget_exhausted`. Both settings apply on reload.
+budget bounds them across all requests: at most `retry.budget_percent` (default 20) of the requests
+in flight may be retries, and `retry.min_retry_concurrency` (default 3) are always allowed, so
+light traffic can still be retried. A retry the budget refuses is answered with 503 and counted as
+`retry_budget_exhausted`.
+
+The numbers in both files are starting points; the [performance report](docs/performance-report.md)
+records what the load test says about them.
 
 ## Observability
 
-The balancer serves two ports: proxied traffic on `listen_addr`, and observability on
-`metrics_addr`. Keeping them apart means `/metrics` and `/status` stay reachable when the traffic
-port is saturated, and neither path is taken away from the backends.
+The balancer serves two ports: traffic on `listen_addr`, and observability on `metrics_addr`.
+Keeping them apart means `/metrics` and `/status` stay reachable when the traffic port is
+saturated, and neither path is taken away from the backends.
 
-- `/metrics` — Prometheus format: requests by backend and status, a latency histogram, backend
-  failures, retries sent, rejected requests by reason, and live gauges for active connections
-  and health
-- `/status` — a JSON summary for a person: algorithm, healthy count, applied reload count, and
-  each backend's weight, health and active connections
-- `/debug/pprof/` — Go's profiling endpoints, served only when `enable_pprof` is set. They expose
-  heap and goroutine state, so they are off by default.
+- `/metrics` — Prometheus format: requests by backend and status, a latency histogram, failed
+  attempts, retries, refusals by reason, reloads, and live gauges for requests in flight and health
+- `/status` — a JSON summary for a person: algorithm, healthy count, reloads applied, and each
+  backend's weight, health and requests in flight
+- `/debug/pprof/` — Go's profiling endpoints, served only when `enable_pprof` is set, because they
+  expose heap and goroutine state
 
-The compose environment includes Prometheus (`localhost:9090`) and Grafana (`localhost:3000`, no
-login) with three linked dashboards in an *Ege-Balancer* folder:
+The environment includes Prometheus on [localhost:9090](http://localhost:9090), scraping the
+balancer every five seconds, and Grafana on [localhost:3000](http://localhost:3000) with three
+linked dashboards in an *Ege-Balancer* folder:
 
-- **Overview** — requests, error-free share, p99, healthy backends and reloads at a glance; the
-  request rate and share of traffic per backend; latency; and a health timeline.
-- **Backends** — a sortable table per backend, share of traffic, requests in flight averaged over
-  a window, p95 latency per backend and a latency heatmap.
-- **Resilience** — answers by status class, refusals by reason, retries against the retry budget,
-  failed attempts, health and reloads.
+| Dashboard | What it shows |
+| --- | --- |
+| [Overview](http://localhost:3000/d/ege-balancer) | requests, error-free share, p99, healthy backends and reloads at a glance; request rate and share of traffic per backend; latency; a health timeline |
+| [Backends](http://localhost:3000/d/ege-balancer-backends) | a sortable table per backend, share of traffic, requests in flight averaged over a window, p95 latency per backend, a latency heatmap |
+| [Resilience](http://localhost:3000/d/ege-balancer-resilience) | answers by status class, refusals by reason, retries against the budget, failed attempts, health and reloads |
 
 Every graph marks configuration reloads, so the moment an algorithm changes is visible. Each
 backend keeps its profile's colour, and a window selector trades detail for smoothness. The
-dashboards are generated by `deploy/grafana/generate_dashboards.py`; edit the script and run it
-rather than the JSON.
-
-Prometheus scrapes the balancer's compose service at `loadbalancer:8081`. To watch a balancer
-running on the host instead, `deploy/prometheus.yml` explains the change: stop the compose service
-and point the target at `host.docker.internal:8081`, never both at once.
+dashboards are generated by `deploy/grafana/generate_dashboards.py`; edit the script and run it,
+rather than editing the JSON.
 
 ## Performance
 
@@ -193,25 +289,25 @@ after the three bottlenecks the profiling found:
 | 2,000 | 41,421 req/s | 47.3 ms | 87.5 ms | 106.6 ms |
 
 No request failed at any level. The [performance report](docs/performance-report.md) has the
-method, the bottlenecks and the before-and-after numbers.
+method, the bottlenecks and the numbers before and after each fix.
 
 ## Project layout
 
 ```
 cmd/lb/                    entry point: reads configuration, builds the logger, runs the app
-cmd/demo/                  local console for driving the demo stack
-cmd/mockbackend/           mock backend for the demo environment: latency, capacity, answer size
+cmd/demo/                  terminal console for driving the demo environment
+cmd/mockbackend/           mock backend with profiles: latency, capacity, answer size, errors
 internal/app/              wiring, shared by the binary and the integration tests
-internal/config/           configuration parsing, defaults and validation
-internal/balancer/         LBStrategy interface and the three algorithms
+internal/config/           configuration parsing, defaults, validation and reload rules
+internal/balancer/         Backend, the LBStrategy interface and the three algorithms
 internal/health/           active and passive health checking
-internal/proxy/            proxy core: forwarding, failure policies, rate limiting, validation
+internal/proxy/            forwarding, failure policies, retry budget, rate limiting, validation
 internal/server/           listeners, connection limit and graceful shutdown
 internal/observability/    structured logging, Prometheus metrics, status and pprof endpoints
 internal/integration/      end-to-end tests over real sockets
 configs/                   example configurations
-deploy/                    compose environment, Prometheus and Grafana provisioning
-docs/                      design document, development log and performance report
+deploy/                    compose environment, mock backend image, Prometheus and Grafana
+docs/                      design paper, development log, performance report and more
 ```
 
 Modules talk to each other through interfaces — `balancer.LBStrategy`, `health.Checker` — so an
@@ -222,33 +318,23 @@ implementation can be replaced without touching the packages that use it.
 - [Technical design](docs/technical-design/) — the design as a paper, in English and Turkish:
   architecture, algorithms, failure handling and the evaluation. The original design the project
   was built to and its revision notes are kept beside it.
-- [Development log](docs/development-log/) — one page per day, and one for the work after the
-  release: what was built, which decisions were taken and why, what went wrong, and how the result
-  was verified.
-- [Performance report](docs/performance-report.md) — load testing method, the bottlenecks
-  profiling exposed, and throughput and latency before and after each fix.
+- [Development log](docs/development-log/) — one page per day of the plan, and one for the work
+  after the release: what was built, which decisions were taken and why, what went wrong, and how
+  the result was verified.
+- [Performance report](docs/performance-report.md) — the load testing method, the bottlenecks
+  profiling exposed, throughput and latency before and after each fix, and the benchmarks.
 - [Design deviations](docs/design-deviations.md) — every place the implementation departs from
-  the design document, with the reasoning.
+  the original design, with the reasoning.
 - [Deployment checklist](docs/deployment-checklist.md) — the production readiness criteria and
-  their evidence, plus what to check before a release and before real traffic.
+  their evidence, and what to check before a release and before real traffic.
 
 ## Development
 
 Work goes straight to `main`, and CI runs on every push: gofmt, `go vet`, golangci-lint,
-govulncheck, build, and the full test suite under `-race`. Commit messages follow
+govulncheck, the build, the full test suite under `-race`, and both container images. A tag
+`vX.Y.Z` runs the release workflow, which tests again, pushes the image to the GitHub container
+registry and publishes the release. Commit messages follow
 [Conventional Commits](https://www.conventionalcommits.org/).
-
-The suite includes two guards against the bottlenecks the profiling fixed: upstream connections
-must be reused, and forwarding must not allocate a copy buffer per request. Benchmarks cover the
-hot paths — selection, health lookups, rate limiting and forwarding:
-
-```bash
-go test -run '^$' -bench . -benchmem ./...
-```
-
-A separate workflow runs them on every push and compares them with the code before the push; the
-comparison is in the run's summary on GitHub. See the
-[performance report](docs/performance-report.md#keeping-the-fixes) for what they measure.
 
 ## License
 
