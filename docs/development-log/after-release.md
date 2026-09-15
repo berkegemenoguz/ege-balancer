@@ -322,3 +322,55 @@ a new environment is right; an existing one needs its Grafana volume renewed onc
 | Backends table, sorted by p95 | the slow backend first |
 | The generator, run again | identical JSON |
 | A fresh Grafana with the same provisioning | all three dashboards in the *Ege-Balancer* folder |
+
+## Health and readiness endpoints
+
+**Why.** The balancer checked the health of its backends but could not be asked about its own.
+Its metrics port served `/metrics` and `/status`, neither of which answers the yes-or-no question a
+container runtime or an orchestrator asks, and the Compose file said outright that no container
+health check could be defined: the distroless image has no shell and no `curl` to run one with.
+
+### What was built
+
+- `/healthz` on the metrics port: liveness, 200 for as long as the process answers.
+- `/readyz` on the metrics port: readiness, 200 while at least one backend is healthy, 503 when
+  none is and from the moment a shutdown begins.
+- A shutdown order: the balancer reports itself not ready, drains the traffic port, and only then
+  stops the metrics port.
+- `lb -probe <url>`, which exits 0 on a 200 and 1 otherwise, and a health check in the Compose file
+  that runs it against `/healthz`.
+
+### Decisions
+
+**Two endpoints, not one.** A balancer whose backends are all down is still a working balancer.
+If the question "should this be restarted" depended on the pool, a backend outage would restart
+the balancer too, which brings no backend back and drops the connections it held. Only readiness
+depends on the pool; the Compose health check uses liveness.
+
+**On the metrics port.** Every path on the traffic port belongs to the backends; a `/healthz` there
+would shadow theirs, and the mock backends have exactly that path.
+
+**The same source as `/status`.** Readiness asks the health checker `/status` reads, so the two
+cannot disagree about whether a backend is healthy.
+
+**The binary probes itself.** Adding `curl` or a shell to the image would undo the reason for
+distroless. A flag on the binary that is already there costs twenty lines and nothing in the image.
+
+### What went wrong
+
+**Readiness during shutdown needed the metrics port to outlive the traffic port.** Both servers
+shut down on the same signal, so the moment `/readyz` first had to say "shutting down" was the
+moment its port closed. Reporting not ready alone would never have been seen. The metrics server
+now runs on its own context, cancelled only once the traffic server has drained.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `/readyz` with every backend healthy, one healthy, none, and shutting down (unit) | 200, 200, 503 `no healthy backend`, 503 `shutting down` |
+| `/healthz` with no healthy backend while shutting down (unit) | 200 |
+| Two backends killed, then one revived (integration) | `/readyz` 200 → 503 → 200; `/healthz` 200 throughout |
+| Shutdown with a request in flight (integration) | `/readyz` 503 `shutting down` while the request drains; the request answers 200 |
+| The readiness integration tests, 30 runs on 2 CPUs with the race detector | all passed |
+| The shutdown test with the drain removed | fails: `/readyz` answers 200 until its port closes |
+| `lb -probe` against a local balancer | `/healthz` exit 0; `/readyz` exit 1 once the unreachable backends left the pool; a closed port exit 1 |
