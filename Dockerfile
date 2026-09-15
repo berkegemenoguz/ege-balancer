@@ -24,7 +24,8 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/lb /usr/local/bin/lb
 COPY configs/lb.example.yaml /etc/lb/config.yaml
 
-# 8080 carries proxied traffic, 8081 serves /metrics and /status.
+# 8080 carries proxied traffic, 8081 serves /metrics, /status, /healthz and
+# /readyz.
 EXPOSE 8080 8081
 
 USER nonroot:nonroot
