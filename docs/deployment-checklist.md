@@ -50,10 +50,15 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
       when they start failing, and `retry.min_retry_concurrency` covers the quietest traffic
 - [ ] `enable_pprof` is false, or the metrics port is unreachable from outside
 - [ ] The metrics port is not exposed publicly
+- [ ] A liveness check, if the platform restarts unhealthy containers, uses `/healthz`, never
+      `/readyz`: backends going down must not restart the balancer
+- [ ] Whatever routes traffic to the balancer stops on a failing `/readyz`, so a shutdown drains
+      instead of cutting requests off
 - [ ] Prometheus is scraping the balancer and the three Grafana dashboards show data
 
 ## After deploying
 
+- [ ] `/readyz` answers 200, and the container reports itself `healthy`
 - [ ] Every backend reports `lb_backend_healthy` as 1
 - [ ] `lb_requests_total` grows across all backends in the expected proportion
 - [ ] `lb_rejected_requests_total` is flat; a rising `rate_limited` or `no_healthy_backend` means
