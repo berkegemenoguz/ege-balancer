@@ -247,3 +247,23 @@ Least connections could not be shown in the demo, because nothing was ever in fl
 measured forwarding with a ten byte body; and every backend was equal, so neither weights nor
 differences in capacity were ever exercised. Its health check was also only a reachability check:
 the mock reports itself unhealthy while its queue is more than half full.
+
+---
+
+## 14. The balancer answers liveness and readiness probes
+
+**Section 7.6.** After v1.1.
+
+The document monitors the balancer through its metrics and logs, and the day 12 image went without
+a container health check, because a distroless image has no shell or `curl` to run one with.
+
+**What is done instead:** the metrics port also serves `/healthz`, which answers 200 for as long as
+the process answers, and `/readyz`, which answers 200 while at least one backend is healthy and 503
+when none is or once a shutdown has begun. On shutdown the metrics port now stays up until the
+traffic port has drained. `lb -probe <url>` exits 0 on a 200 and 1 otherwise, and the Compose file
+runs it against `/healthz` as the container's health check.
+
+**Why:** a container runtime or an orchestrator asks a yes-or-no question that neither `/metrics`
+nor `/status` answers. Liveness and readiness are separate because a balancer whose backends are
+all down is still working: restarting it would bring no backend back. The probe flag gives the
+image a health check without adding anything to it.
