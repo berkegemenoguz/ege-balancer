@@ -26,6 +26,7 @@ type App struct {
 	checker *health.HTTPChecker
 	handler *proxy.Handler
 	pool    *observability.Pool
+	probes  *observability.Probes
 	metrics *observability.Metrics
 
 	// mu guards the state a reload replaces. Requests never take it: they read
@@ -58,7 +59,8 @@ func New(cfg *config.Config, configPath string) (*App, error) {
 		return nil, err
 	}
 
-	admin, err := server.NewMetrics(cfg, observability.Endpoints(metrics, pool, cfg.EnablePprof))
+	probes := observability.NewProbes(pool)
+	admin, err := server.NewMetrics(cfg, observability.Endpoints(metrics, pool, probes, cfg.EnablePprof))
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +72,7 @@ func New(cfg *config.Config, configPath string) (*App, error) {
 		checker:    checker,
 		handler:    handler,
 		pool:       pool,
+		probes:     probes,
 		metrics:    metrics,
 		cfg:        cfg,
 		backends:   backends,
@@ -123,7 +126,7 @@ func (a *App) Addr() string {
 	return a.traffic.Addr()
 }
 
-// MetricsAddr is the address serving /metrics and /status.
+// MetricsAddr is the address serving /metrics, /status, /healthz and /readyz.
 func (a *App) MetricsAddr() string {
 	return a.admin.Addr()
 }
@@ -132,32 +135,39 @@ func (a *App) MetricsAddr() string {
 // reloading the configuration whenever reload fires. If either server stops on
 // its own, the other is shut down with it rather than leaving the process half
 // alive.
+//
+// Once shutdown begins the balancer reports itself not ready, and the metrics
+// server stays up until the traffic server has drained, so that whatever routes
+// traffic here can see /readyz fail while the requests in flight finish.
 func (a *App) Run(ctx context.Context, reload <-chan struct{}) error {
 	ctx, stopAll := context.WithCancel(ctx)
 	defer stopAll()
 
 	a.checker.Start(ctx, a.backends)
 	go a.reloadUntilDone(ctx, reload)
+	context.AfterFunc(ctx, a.probes.Drain)
 
 	slog.Info("load balancer started",
 		"listen_addr", a.Addr(), "metrics_addr", a.MetricsAddr(),
 		"algorithm", a.handler.Strategy().Name(), "backends", len(a.backends))
 
-	servers := []*server.Server{a.traffic, a.admin}
-	failures := make([]error, len(servers))
+	adminCtx, stopAdmin := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopAdmin()
 
+	var trafficErr, adminErr error
 	var wg sync.WaitGroup
-	for i, srv := range servers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer stopAll()
-			failures[i] = srv.Run(ctx)
-		}()
-	}
+	wg.Go(func() {
+		defer stopAdmin()
+		defer stopAll()
+		trafficErr = a.traffic.Run(ctx)
+	})
+	wg.Go(func() {
+		defer stopAll()
+		adminErr = a.admin.Run(adminCtx)
+	})
 	wg.Wait()
 
-	return errors.Join(failures...)
+	return errors.Join(trafficErr, adminErr)
 }
 
 // reloadUntilDone applies a reload each time one is asked for.

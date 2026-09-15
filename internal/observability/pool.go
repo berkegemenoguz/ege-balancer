@@ -133,12 +133,15 @@ func (p *Pool) StatusHandler() http.Handler {
 	})
 }
 
-// Endpoints returns the handler serving /metrics and /status, and the Go
-// profiling endpoints under /debug/pprof when they are enabled.
-func Endpoints(metrics *Metrics, pool *Pool, withPprof bool) http.Handler {
+// Endpoints returns the handler serving /metrics, /status, /healthz and
+// /readyz, and the Go profiling endpoints under /debug/pprof when they are
+// enabled.
+func Endpoints(metrics *Metrics, pool *Pool, probes *Probes, withPprof bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.Handle("/status", pool.StatusHandler())
+	mux.Handle("/healthz", probes.LiveHandler())
+	mux.Handle("/readyz", probes.ReadyHandler())
 
 	if withPprof {
 		mux.HandleFunc("/debug/pprof/", pprof.Index)

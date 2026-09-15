@@ -118,7 +118,7 @@ func TestStatusReportsThePool(t *testing.T) {
 	}})
 
 	recorder := httptest.NewRecorder()
-	Endpoints(NewMetrics(), pool, false).ServeHTTP(recorder,
+	Endpoints(NewMetrics(), pool, NewProbes(pool), false).ServeHTTP(recorder,
 		httptest.NewRequest(http.MethodGet, "/status", nil))
 
 	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
@@ -197,7 +197,7 @@ func TestPprofIsServedOnlyWhenEnabled(t *testing.T) {
 		{true, http.StatusOK},
 	} {
 		recorder := httptest.NewRecorder()
-		Endpoints(NewMetrics(), pool, test.enabled).ServeHTTP(recorder,
+		Endpoints(NewMetrics(), pool, NewProbes(pool), test.enabled).ServeHTTP(recorder,
 			httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil))
 
 		if recorder.Code != test.want {
@@ -225,7 +225,7 @@ func TestPoolReloadFollowsTheNewBackends(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	Endpoints(metrics, pool, false).ServeHTTP(recorder,
+	Endpoints(metrics, pool, NewProbes(pool), false).ServeHTTP(recorder,
 		httptest.NewRequest(http.MethodGet, "/status", nil))
 
 	var reported status
