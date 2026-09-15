@@ -7,9 +7,10 @@ backends leave the pool on their own and come back when they recover, failures a
 policy you choose, and the whole system can be watched through structured logs, Prometheus metrics
 and Grafana dashboards.
 
-> Status: v1.1.0. The twelve day plan was released as v1.0.0; v1.1.0 adds a retry budget and
-> least connections by the power of two choices. Everything below is implemented and tested,
-> except where *Out of scope* says otherwise.
+> Status: v1.2.0. The twelve day plan was released as v1.0.0; v1.1.0 added a retry budget and
+> least connections by the power of two choices; v1.2.0 adds liveness and readiness endpoints, a
+> container health check, profiled mock backends and three Grafana dashboards. Everything below is
+> implemented and tested, except where *Out of scope* says otherwise.
 
 ## Contents
 
