@@ -45,8 +45,8 @@ and Grafana dashboards.
 - **Graceful shutdown** on SIGINT or SIGTERM, letting requests already in flight finish
 - **Configuration reload on SIGHUP** without dropping a connection; an invalid file is refused and
   the balancer keeps running on what it had
-- **Observability**: structured logs, Prometheus metrics, a JSON status endpoint, optional
-  profiling endpoints, and three Grafana dashboards
+- **Observability**: structured logs, Prometheus metrics, a JSON status endpoint, liveness and
+  readiness endpoints, optional profiling endpoints, and three Grafana dashboards
 - **Shipped as a container**: a 22.6 MB distroless image running as a non-root user, published on
   every tag
 
@@ -155,6 +155,10 @@ The balancer serves traffic on port 8080 and its status on 8081:
 curl -s localhost:8081/status
 ```
 
+`/readyz` on the same port answers 200 while there is a healthy backend to send a request to, and
+`docker compose -f deploy/docker-compose.yml ps` shows the balancer as `healthy` once its own
+health check passes.
+
 Send it traffic and count which backend answered:
 
 ```bash
@@ -199,9 +203,15 @@ docker run --rm -p 8080:8080 -p 8081:8081 \
   ghcr.io/berkegemenoguz/ege-balancer:latest
 ```
 
-The image holds the binary and nothing else — no shell, no package manager. Without a shell there
-is nothing to run a container healthcheck with; `/status` on port 8081 serves that purpose from
-outside.
+The image holds the binary and nothing else — no shell, no package manager, no curl. A container
+health check therefore runs the binary itself:
+
+```bash
+docker exec <container> /usr/local/bin/lb -probe http://127.0.0.1:8081/healthz
+```
+
+`-probe` requests the URL and exits 0 if it answers 200 and 1 otherwise, which is what Docker and
+Compose health checks expect.
 
 ## Tests and benchmarks
 
@@ -252,13 +262,18 @@ records what the load test says about them.
 ## Observability
 
 The balancer serves two ports: traffic on `listen_addr`, and observability on `metrics_addr`.
-Keeping them apart means `/metrics` and `/status` stay reachable when the traffic port is
-saturated, and neither path is taken away from the backends.
+Keeping them apart means these endpoints stay reachable when the traffic port is saturated, and
+none of their paths is taken away from the backends.
 
 - `/metrics` — Prometheus format: requests by backend and status, a latency histogram, failed
   attempts, retries, refusals by reason, reloads, and live gauges for requests in flight and health
 - `/status` — a JSON summary for a person: algorithm, healthy count, reloads applied, and each
   backend's weight, health and requests in flight
+- `/healthz` — liveness: 200 for as long as the process answers. Backends being down does not
+  change it, because restarting the balancer would bring none of them back
+- `/readyz` — readiness: 200 while at least one backend is healthy, 503 when none is and from the
+  moment a shutdown begins, so that whatever routes traffic here stops while requests in flight
+  finish. The metrics port stays up until they have
 - `/debug/pprof/` — Go's profiling endpoints, served only when `enable_pprof` is set, because they
   expose heap and goroutine state
 
