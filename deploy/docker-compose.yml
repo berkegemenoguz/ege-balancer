@@ -105,8 +105,15 @@ services:
     volumes: ["../configs/lb.example.yaml:/etc/lb/config.yaml:ro"]
     depends_on: [backend-1, backend-2]
     mem_limit: 128m
-    # The image carries no shell, so there is nothing to run a container
-    # healthcheck with; /status on port 8081 serves that purpose from outside.
+    healthcheck:
+      # The image carries no shell and no curl, so the binary checks itself.
+      # /healthz rather than /readyz: backends being down does not make the
+      # balancer unhealthy, and restarting it would bring none of them back.
+      test: ["CMD", "/usr/local/bin/lb", "-probe", "http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
   prometheus:
     image: prom/prometheus
