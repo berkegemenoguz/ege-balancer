@@ -23,10 +23,19 @@ var version = "dev"
 func main() {
 	configPath := flag.String("config", "configs/lb.example.yaml", "path to the configuration file")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	probeURL := flag.String("probe", "", "request this URL and exit 0 if it answers 200, 1 otherwise; for container health checks")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("ege-balancer", version)
+		return
+	}
+
+	if *probeURL != "" {
+		if err := probe(*probeURL); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 
