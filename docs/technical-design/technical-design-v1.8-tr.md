@@ -480,8 +480,8 @@ Bu sürümde güvenlik, ağır bir katmandan çok, ucuz ama etkisi büyük önle
   zaten reddeder; kontrol, proxy buna bağımlı olmasın diye tekrarlanır.
 - **Yönlendirme başlıkları.** `X-Forwarded-For` ve ilgili başlıklar eklenmez, yeniden yazılır;
   böylece bir istemci backend'in göreceği adresi taklit edemez.
-- **Ayrı gözlemlenebilirlik portu.** `/metrics`, `/status` ve opsiyonel pprof uçları trafik portunda
-  değil, `metrics_addr` üzerinde sunulur. pprof, heap ve goroutine durumunu açığa çıkardığı için
+- **Ayrı gözlemlenebilirlik portu.** `/metrics`, `/status`, `/healthz`, `/readyz` ve opsiyonel
+  pprof uçları trafik portunda değil, `metrics_addr` üzerinde sunulur. pprof, heap ve goroutine durumunu açığa çıkardığı için
   varsayılan olarak kapalıdır.
 - **Tedarik zinciri ve imaj.** CI her push'ta `govulncheck` çalıştırır. İmaj iki aşamada derlenir ve
   `distroless/static:nonroot` üzerinde çalışır — 22,6 MB, kabuk yok, paket yöneticisi yok, root
@@ -513,6 +513,20 @@ böylece zamanla sapabilecek ikinci bir kopya yoktur.
 yenileme sayısı ve her backend'in ağırlığı, sağlığı ve uçuştaki istek sayısı. Loglar `log/slog`
 üzerinden yapılandırılmış JSON (ya da metin) olarak yazılır. Etkinleştirildiğinde `/debug/pprof`
 metrik portunda sunulur.
+
+İki uç daha bir insana değil bir orkestratöre cevap verir. `/healthz` canlılığı bildirir ve süreç
+cevap verebildiği sürece 200 döner. `/readyz` hazır olmayı bildirir: `/status`'un okuduğu aynı
+sağlık kontrolüne göre en az bir backend sağlıklı olduğu sürece 200, hiçbiri sağlıklı değilse ya da
+kapanma başladıysa 503 döner. İkisi bilerek ayrı tutulur: bütün backend'leri düşmüş bir yük
+dengeleyici hâlâ çalışmaktadır ve onu yeniden başlatmak hiçbir backend'i geri getirmez; bu yüzden
+yalnızca hazır olma durumu havuza bağlıdır.
+
+Kapanırken yük dengeleyici önce kendini hazır değil olarak bildirir, sonra trafik portunu boşaltır
+ve metrik portunu ancak trafik portu boşaldıktan sonra kapatır. İkisini birlikte kapatmak, önceden
+olduğu gibi, `/readyz`'i söyleyecek bir şeyi olduğu tek anda ortadan kaldırıyordu. Distroless
+imajda bir container sağlık kontrolünü çalıştıracak kabuk ya da `curl` yoktur; bu yüzden binary
+kendini kontrol eder: `lb -probe <url>` 200 gelirse 0, gelmezse 1 ile çıkar ve Compose dosyası
+bunu `/healthz` üzerinde çalıştırır (Ek B, 14. madde).
 
 ### 8.3 İzleme yığını
 
@@ -884,7 +898,7 @@ sonrası üç ekleme spekülasyondan değil ölçümden geldi.
 
 ```yaml
 listen_addr: ":8080"                # trafik; değiştirmek için yeniden başlatın
-metrics_addr: ":8081"               # /metrics, /status, pprof; yeniden başlatma gerekir
+metrics_addr: ":8081"               # /metrics, /status, /healthz, /readyz, pprof; yeniden başlatma gerekir
 enable_pprof: false                 # yeniden başlatma gerekir
 algorithm: round_robin              # round_robin | least_connections | weighted_round_robin
 failure_policy: retry_next_backend  # retry_next_backend | fail_fast | circuit_breaker
@@ -952,6 +966,7 @@ Her maddenin gerekçesi [`docs/design-deviations.md`](../design-deviations.md) d
 | 11 | Hata stratejilerine bir retry budget eklendi | 5.5 | §6.5 |
 | 12 | Least connections taramak yerine rastgele iki backend'i karşılaştırır | 5.2 | §5.4, §10.7 |
 | 13 | Mock backend'ler `http-echo` değil, profilleri olan projeye ait bir programdır | 8 | §9.4 |
+| 14 | Yük dengeleyici canlılık ve hazır olma sorgularına cevap verir, imajı kendini kontrol eder | 7.6 | §8.2 |
 | — | Epoll öğrenme egzersizi yapılmadı | 4.2 | §4.3 |
 
 ---
