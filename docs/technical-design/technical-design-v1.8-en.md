@@ -477,8 +477,8 @@ layer.
   the check is repeated so the proxy does not depend on it.
 - **Forwarding headers.** `X-Forwarded-For` and related headers are rewritten, not appended to, so a
   client cannot forge the address a backend sees.
-- **Separate observability port.** `/metrics`, `/status` and the optional pprof endpoints are served
-  on `metrics_addr`, never on the traffic port. pprof is off by default because it exposes heap and
+- **Separate observability port.** `/metrics`, `/status`, `/healthz`, `/readyz` and the optional
+  pprof endpoints are served on `metrics_addr`, never on the traffic port. pprof is off by default because it exposes heap and
   goroutine state.
 - **Supply chain and image.** CI runs `govulncheck` on every push. The image is built in two stages
   and runs on `distroless/static:nonroot` — 22.6 MB, no shell, no package manager, a non-root user.
@@ -508,6 +508,19 @@ separate variables, so there is no second copy of the state to drift.
 `/status` answers a person rather than a scraper: the algorithm, the healthy count, the number of
 reloads applied, and each backend's weight, health and in-flight count. Logs are structured JSON
 (or text) through `log/slog`. `/debug/pprof` is available on the metrics port when enabled.
+
+Two further endpoints answer an orchestrator rather than a person. `/healthz` reports liveness and
+answers 200 for as long as the process answers at all. `/readyz` reports readiness: 200 while at
+least one backend is healthy, by the same health checker `/status` reads, and 503 when none is or
+once a shutdown has begun. The two are kept apart on purpose: a balancer whose backends are all
+down is still working, and restarting it would bring no backend back, so only readiness depends on
+the pool.
+
+On shutdown the balancer first reports itself not ready, then drains the traffic port, and stops
+the metrics port only after the traffic port has drained. Stopping both together, as before, took
+`/readyz` away at the one moment it had something to say. The distroless image has no shell or
+`curl` to run a container health check with, so the binary checks itself: `lb -probe <url>` exits 0
+on a 200 and 1 otherwise, and the Compose file runs it against `/healthz` (Appendix B, entry 14).
 
 ### 8.3 Monitoring stack
 
@@ -871,7 +884,7 @@ bottlenecks and all three post-release additions came from measurement, not spec
 
 ```yaml
 listen_addr: ":8080"                # traffic; restart to change
-metrics_addr: ":8081"               # /metrics, /status, pprof; restart to change
+metrics_addr: ":8081"               # /metrics, /status, /healthz, /readyz, pprof; restart to change
 enable_pprof: false                 # restart to change
 algorithm: round_robin              # round_robin | least_connections | weighted_round_robin
 failure_policy: retry_next_backend  # retry_next_backend | fail_fast | circuit_breaker
@@ -939,6 +952,7 @@ The reasoning for each entry is in [`docs/design-deviations.md`](../design-devia
 | 11 | A retry budget was added to the failure policies | 5.5 | §6.5 |
 | 12 | Least connections compares two random backends instead of scanning | 5.2 | §5.4, §10.7 |
 | 13 | The mock backends are a program of the project with profiles, not `http-echo` | 8 | §9.4 |
+| 14 | The balancer answers liveness and readiness probes, and its image checks itself | 7.6 | §8.2 |
 | — | The epoll learning exercise was not carried out | 4.2 | §4.3 |
 
 ---
