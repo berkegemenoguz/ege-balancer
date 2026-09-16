@@ -374,3 +374,97 @@ now runs on its own context, cancelled only once the traffic server has drained.
 | The readiness integration tests, 30 runs on 2 CPUs with the race detector | all passed |
 | The shutdown test with the drain removed | fails: `/readyz` answers 200 until its port closes |
 | `lb -probe` against a local balancer | `/healthz` exit 0; `/readyz` exit 1 once the unreachable backends left the pool; a closed port exit 1 |
+
+## Requests that must not be retried
+
+**Why.** `retry_next_backend` retried any failed attempt on another backend, whatever the method
+was. A backend can take a request, carry it out, and then fail before its answer reaches the
+balancer — the connection breaks, or with `retry_on_5xx` set it answers 5xx after doing the work.
+The balancer cannot tell that apart from a request that never arrived, so a retried POST could
+place a second order or take a second payment.
+
+### What was built
+
+- `internal/proxy/idempotency.go`: `idempotent` for the methods RFC 9110 defines as such, and
+  `retryable`, which allows a retry when the method is idempotent or the dial failed.
+- The retry loop stops before a further attempt when the request is not retryable, answers 503 and
+  counts `lb_rejected_requests_total{reason="not_retryable"}`.
+
+### Decisions
+
+**Nothing in the configuration.** A switch for retrying POST would be a switch for the unsafe
+behaviour. nginx has one (`non_idempotent`) and keeps it off; this project has consistently
+declined to add such switches, so the rule lives in the code.
+
+**A failed dial is the exception.** It is the one failure that proves no backend received the
+request, so a POST is still retried past a backend that is not listening. This is also what keeps
+the existing resilience behaviour: a backend that is down is skipped for every method.
+
+**The method decides, not the body.** Bodies are still buffered for replay when retries are
+possible, because an idempotent request with a body — a PUT — is retried like any other.
+
+**5xx counts as received.** Under `retry_on_5xx` a 5xx answer is a failed attempt, but the backend
+answered, so it had the request. A POST is not sent on.
+
+### What went wrong
+
+**The first version of the test raced.** The backend that takes a request and closes the
+connection counted its requests in a plain int. With no answer to synchronise with, the handler's
+write and the test's read are unordered, and the race detector said so. The counter is now atomic.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `retryable` over methods and failures (unit) | GET retried after any failure; POST only after a failed dial |
+| POST against a backend that takes it and closes the connection (unit) | 503; the second backend is never asked |
+| The same failure with GET (unit) | retried, answered 200 by the second backend |
+| POST against a backend that is not listening (unit) | retried, answered 200 |
+| POST with `retry_on_5xx` and a 5xx answer (unit) | 503; the second backend is never asked |
+| Six POSTs over two backends, one taking requests and dropping them (integration) | the ones it took are refused, the rest answered; nothing retried onto the live backend |
+| Six GETs in the same setup (integration) | all six answered 200 |
+
+## Request identifiers
+
+**Why.** A request that fails appears in several logs: the balancer's, and one for each backend it
+was offered to. Nothing tied those lines together, and a client reporting a problem had nothing to
+quote. With ten backends and retries, lining up the logs by timestamp is guesswork.
+
+### What was built
+
+- `internal/proxy/requestid.go`: every request is given an identifier, returned to the client and
+  sent on to the backend as `X-Request-Id`.
+- `request_id` on every log line about a request, in the proxy core, the rate limiter and the
+  request validator.
+
+### Decisions
+
+**The client's own identifier is kept.** A trace that started in front of the balancer should
+survive it. It is accepted only as printable ASCII of at most 64 characters, because the value
+reaches the logs of the balancer and of every backend: an unbounded or control-character header
+would be a way to make those logs unreadable or forged. Anything else is replaced.
+
+**Generated with `crypto/rand.Text`.** 26 base32 characters from the standard library, with no
+dependency and no error to handle. A counter would restart at zero on every restart and collide
+across processes.
+
+**Assigned outermost.** The identifier is set before rate limiting and validation, so a request
+the balancer refuses itself carries one too — which is exactly the request someone asks about.
+
+**Carried on the context.** The forwarder reads it there when it writes the outbound header, so
+one `ReverseProxy` still serves every attempt and the value cannot be taken from a header the
+client controls.
+
+**No configuration.** The header name is the conventional one and nothing here needs tuning.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| A request without the header (unit) | an identifier is returned to the client and the backend is sent the same one |
+| A request with `X-Request-Id: trace-42` (unit) | kept, both to the backend and back to the client |
+| An empty, over-long or control-character header (unit) | replaced by one of the balancer's own |
+| A request refused by the rate limiter (unit) | the 429 still carries an identifier |
+| Two requests through the assembled balancer (integration) | both answered with identifiers, and they differ |
+| A client's identifier through the assembled balancer (integration) | comes back unchanged |
+| The balancer and one mock backend, run for real | the answer carries the generated identifier; the debug line `request served` carries it as `request_id`; a client's `order-7` appears in both; the failure lines of an unreachable backend carry it too |
