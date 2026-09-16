@@ -399,6 +399,15 @@ A retry never repeats a backend within one request. To be replayable, a request 
 when retries are possible, up to `max_request_body_bytes`; with a single attempt it is streamed
 straight through.
 
+Whether a request may be retried at all depends on its method. An idempotent request — GET, HEAD,
+PUT, DELETE, OPTIONS, TRACE, as RFC 9110 defines them — is retried after any failure. A request
+that is not, which is POST, PATCH or a method the balancer does not know, is retried only when the
+connection to the backend was never made: that is the one failure which proves no backend saw the
+request. Any later failure, including a 5xx answer under `retry_on_5xx`, ends the request with 503
+counted as `not_retryable`, because the backend may have carried the request out and answered into
+a connection that then broke, and a second attempt would place a second order (Appendix B, entry
+15).
+
 ### 6.4 Circuit breaker
 
 ```mermaid
@@ -452,6 +461,7 @@ exactly as before.
 | Body over `max_request_body_bytes` | 413 | `body_too_large` |
 | Every attempt failed, or no backend to try | 503, `Retry-After: 5` | `no_backend_available` |
 | A retry refused by the budget | 503, `Retry-After: 5` | `retry_budget_exhausted` |
+| A failed POST or PATCH a backend may already have carried out | 503, `Retry-After: 5` | `not_retryable` |
 | Backend answered 5xx, `retry_on_5xx: false` | the backend's own response | — |
 | Every backend unhealthy but answering | the backend's own response | `no_healthy_backend` (counted, not refused) |
 
@@ -508,6 +518,13 @@ separate variables, so there is no second copy of the state to drift.
 `/status` answers a person rather than a scraper: the algorithm, the healthy count, the number of
 reloads applied, and each backend's weight, health and in-flight count. Logs are structured JSON
 (or text) through `log/slog`. `/debug/pprof` is available on the metrics port when enabled.
+
+Every request carries an identifier, which ties those logs to the backend's own. It is taken from
+the client's `X-Request-Id` when that is printable ASCII of at most 64 characters — so a trace that
+started before the balancer is not broken here — and generated otherwise, from `crypto/rand`. It is
+returned to the client, sent on to the backend in the same header, and logged as `request_id`. It is
+assigned outermost, before rate limiting and validation, so a request the balancer refuses itself
+can be traced as well as one it forwards (Appendix B, entry 16).
 
 Two further endpoints answer an orchestrator rather than a person. `/healthz` reports liveness and
 answers 200 for as long as the process answers at all. `/readyz` reports readiness: 200 while at
@@ -953,6 +970,8 @@ The reasoning for each entry is in [`docs/design-deviations.md`](../design-devia
 | 12 | Least connections compares two random backends instead of scanning | 5.2 | §5.4, §10.7 |
 | 13 | The mock backends are a program of the project with profiles, not `http-echo` | 8 | §9.4 |
 | 14 | The balancer answers liveness and readiness probes, and its image checks itself | 7.6 | §8.2 |
+| 15 | A request that is not idempotent is retried only before a backend has it | 5.5 | §6.3 |
+| 16 | Every request carries an identifier, in the logs and in `X-Request-Id` | 7.6 | §8.2 |
 | — | The epoll learning exercise was not carried out | 4.2 | §4.3 |
 
 ---
