@@ -46,8 +46,9 @@ and Grafana dashboards.
 - **Graceful shutdown** on SIGINT or SIGTERM, letting requests already in flight finish
 - **Configuration reload on SIGHUP** without dropping a connection; an invalid file is refused and
   the balancer keeps running on what it had
-- **Observability**: structured logs, Prometheus metrics, a JSON status endpoint, liveness and
-  readiness endpoints, optional profiling endpoints, and three Grafana dashboards
+- **Observability**: structured logs carrying a request identifier, Prometheus metrics, a JSON
+  status endpoint, liveness and readiness endpoints, optional profiling endpoints, and three
+  Grafana dashboards
 - **Shipped as a container**: a 22.6 MB distroless image running as a non-root user, published on
   every tag
 
@@ -257,6 +258,12 @@ in flight may be retries, and `retry.min_retry_concurrency` (default 3) are alwa
 light traffic can still be retried. A retry the budget refuses is answered with 503 and counted as
 `retry_budget_exhausted`.
 
+A request that is not idempotent — POST, PATCH, or a method the balancer does not know — is retried
+only while nothing can have acted on it, which means the connection to the backend was never made.
+Once the request is on the wire the backend may have carried it out and answered into a connection
+that then broke, so sending it again could place a second order; the client receives 503 instead,
+counted as `not_retryable`. Idempotent requests are retried after any failure.
+
 The numbers in both files are starting points; the [performance report](docs/performance-report.md)
 records what the load test says about them.
 
@@ -277,6 +284,16 @@ none of their paths is taken away from the backends.
   finish. The metrics port stays up until they have
 - `/debug/pprof/` — Go's profiling endpoints, served only when `enable_pprof` is set, because they
   expose heap and goroutine state
+
+Every request is given an identifier, returned to the client and sent on to the backend as
+`X-Request-Id`, and every log line about that request carries it as `request_id`. A client that
+already sends the header keeps its own value, as long as it is printable ASCII of at most 64
+characters; anything else is replaced. The identifier is assigned before rate limiting and
+validation, so a refused request can be traced too:
+
+```bash
+curl -si localhost:8080 | grep -i x-request-id
+```
 
 The environment includes Prometheus on [localhost:9090](http://localhost:9090), scraping the
 balancer every five seconds, and Grafana on [localhost:3000](http://localhost:3000) with three
