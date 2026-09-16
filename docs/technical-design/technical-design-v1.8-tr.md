@@ -403,6 +403,14 @@ Bir retry, aynı istek içinde hiçbir zaman bir backend'i tekrar etmez. Yeniden
 istek gövdesi, retry mümkün olduğunda `max_request_body_bytes`'a kadar tamponlanır; tek denemede
 doğrudan akıtılır.
 
+Bir isteğin retry edilip edilebileceği ise metoduna bağlıdır. RFC 9110'un tanımladığı idempotent
+istekler — GET, HEAD, PUT, DELETE, OPTIONS, TRACE — her hatadan sonra retry edilir. Olmayanlar,
+yani POST, PATCH ya da yük dengeleyicinin tanımadığı bir metot, yalnızca backend'e bağlantı hiç
+kurulamadığında retry edilir: hiçbir backend'in isteği görmediğini kanıtlayan tek hata budur.
+Sonraki her hata — `retry_on_5xx` açıkken gelen bir 5xx yanıt dahil — isteği `not_retryable` olarak
+sayılan bir 503 ile bitirir; çünkü backend isteği yerine getirmiş ve yanıtını sonra kopan bir
+bağlantıya yazmış olabilir, ikinci bir deneme ikinci bir sipariş oluşturur (Ek B, 15. madde).
+
 ### 6.4 Devre kesici
 
 ```mermaid
@@ -456,6 +464,7 @@ gibi retry yapar.
 | `max_request_body_bytes`'ı aşan gövde | 413 | `body_too_large` |
 | Tüm denemeler başarısız ya da denenecek backend yok | 503, `Retry-After: 5` | `no_backend_available` |
 | Budget'ın reddettiği retry | 503, `Retry-After: 5` | `retry_budget_exhausted` |
+| Backend'in yerine getirmiş olabileceği, başarısız bir POST ya da PATCH | 503, `Retry-After: 5` | `not_retryable` |
 | Backend 5xx döndü, `retry_on_5xx: false` | backend'in kendi yanıtı | — |
 | Tüm backend'ler sağlıksız ama cevap veriyor | backend'in kendi yanıtı | `no_healthy_backend` (sayılır, reddedilmez) |
 
@@ -513,6 +522,13 @@ böylece zamanla sapabilecek ikinci bir kopya yoktur.
 yenileme sayısı ve her backend'in ağırlığı, sağlığı ve uçuştaki istek sayısı. Loglar `log/slog`
 üzerinden yapılandırılmış JSON (ya da metin) olarak yazılır. Etkinleştirildiğinde `/debug/pprof`
 metrik portunda sunulur.
+
+Her istek, bu logları backend'in kendi loglarına bağlayan bir kimlik taşır. Kimlik, istemcinin
+`X-Request-Id` başlığı en fazla 64 karakterlik yazdırılabilir ASCII ise ondan alınır — böylece yük
+dengeleyiciden önce başlamış bir iz burada kopmaz — değilse `crypto/rand` ile üretilir. İstemciye
+geri döner, aynı başlıkla backend'e iletilir ve loglara `request_id` olarak yazılır. En dışta
+atanır, yani hız sınırlama ve doğrulamadan önce; böylece yük dengeleyicinin kendisinin reddettiği
+bir istek de ilettiği bir istek kadar izlenebilir (Ek B, 16. madde).
 
 İki uç daha bir insana değil bir orkestratöre cevap verir. `/healthz` canlılığı bildirir ve süreç
 cevap verebildiği sürece 200 döner. `/readyz` hazır olmayı bildirir: `/status`'un okuduğu aynı
@@ -967,6 +983,8 @@ Her maddenin gerekçesi [`docs/design-deviations.md`](../design-deviations.md) d
 | 12 | Least connections taramak yerine rastgele iki backend'i karşılaştırır | 5.2 | §5.4, §10.7 |
 | 13 | Mock backend'ler `http-echo` değil, profilleri olan projeye ait bir programdır | 8 | §9.4 |
 | 14 | Yük dengeleyici canlılık ve hazır olma sorgularına cevap verir, imajı kendini kontrol eder | 7.6 | §8.2 |
+| 15 | Idempotent olmayan bir istek, yalnızca bir backend onu almadan önce retry edilir | 5.5 | §6.3 |
+| 16 | Her istek, loglarda ve `X-Request-Id` başlığında bir kimlik taşır | 7.6 | §8.2 |
 | — | Epoll öğrenme egzersizi yapılmadı | 4.2 | §4.3 |
 
 ---
