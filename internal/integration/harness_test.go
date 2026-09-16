@@ -159,6 +159,21 @@ func testConfig(backends []*backend, weights ...int) *config.Config {
 	}
 }
 
+// pinHealth keeps every backend in the pool for the whole test by putting the
+// unhealthy threshold out of reach.
+//
+// A test about how a strategy spreads traffic needs this. testConfig probes
+// every 10ms with a 5ms timeout, so on a loaded machine a couple of probes time
+// out, a backend leaves the pool for a few milliseconds, and its turns go to
+// others: an exactly even distribution then comes out one or two requests off
+// while every client request still succeeds. The timeout cannot simply be
+// raised instead, because the configuration requires it to be shorter than the
+// interval.
+func pinHealth(cfg *config.Config) *config.Config {
+	cfg.HealthCheck.UnhealthyThreshold = 1000
+	return cfg
+}
+
 // balancer is a running load balancer under test.
 type balancerUnderTest struct {
 	url        string

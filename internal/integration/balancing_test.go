@@ -14,7 +14,7 @@ func TestRoundRobinSpreadsTrafficEvenly(t *testing.T) {
 	const requests = 100
 
 	backends := newBackends(t, 10)
-	under := start(t, testConfig(backends))
+	under := start(t, pinHealth(testConfig(backends)))
 
 	bodies, statuses := under.send(t, requests)
 
@@ -36,7 +36,7 @@ func TestWeightedRoundRobinFollowsTheConfiguredRatio(t *testing.T) {
 	cfg := testConfig(backends, 1, 2, 3)
 	cfg.Algorithm = config.WeightedRoundRobin
 
-	under := start(t, cfg)
+	under := start(t, pinHealth(cfg))
 	bodies, statuses := under.send(t, requests)
 
 	if statuses[http.StatusOK] != requests {
@@ -61,7 +61,7 @@ func TestLeastConnectionsSpreadsSequentialTraffic(t *testing.T) {
 	cfg := testConfig(backends)
 	cfg.Algorithm = config.LeastConnections
 
-	under := start(t, cfg)
+	under := start(t, pinHealth(cfg))
 	bodies, statuses := under.send(t, requests)
 
 	if statuses[http.StatusOK] != requests {
@@ -87,7 +87,7 @@ func TestLeastConnectionsAvoidsTheSlowBackend(t *testing.T) {
 	cfg := testConfig(backends)
 	cfg.Algorithm = config.LeastConnections
 
-	under := start(t, cfg)
+	under := start(t, pinHealth(cfg))
 	under.sendConcurrently(t, requests)
 
 	slow := backends[0].hits.Load()
@@ -115,7 +115,7 @@ func TestLeastConnectionsAvoidsASlowBackendUnderSustainedLoad(t *testing.T) {
 
 	cfg := testConfig(backends)
 	cfg.Algorithm = config.LeastConnections
-	under := start(t, cfg)
+	under := start(t, pinHealth(cfg))
 
 	var wg sync.WaitGroup
 	for range workers {

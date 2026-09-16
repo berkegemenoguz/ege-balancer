@@ -54,7 +54,7 @@ func TestReloadSwitchesAlgorithm(t *testing.T) {
 	const requests = 60
 
 	backends := newBackends(t, 3)
-	cfg := testConfig(backends, 1, 2, 3)
+	cfg := pinHealth(testConfig(backends, 1, 2, 3))
 	under := start(t, cfg)
 
 	// Round robin ignores the weights.
@@ -65,7 +65,7 @@ func TestReloadSwitchesAlgorithm(t *testing.T) {
 		}
 	}
 
-	weighted := testConfig(backends, 1, 2, 3)
+	weighted := pinHealth(testConfig(backends, 1, 2, 3))
 	weighted.Algorithm = config.WeightedRoundRobin
 	under.reconfigure(t, weighted)
 

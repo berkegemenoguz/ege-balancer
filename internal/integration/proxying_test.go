@@ -137,7 +137,7 @@ func TestObservabilityEndpointsReflectTraffic(t *testing.T) {
 	const requests = 20
 
 	backends := newBackends(t, 4)
-	under := start(t, testConfig(backends))
+	under := start(t, pinHealth(testConfig(backends)))
 	under.send(t, requests)
 
 	metrics := under.scrape(t)
