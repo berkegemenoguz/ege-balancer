@@ -468,3 +468,47 @@ client controls.
 | Two requests through the assembled balancer (integration) | both answered with identifiers, and they differ |
 | A client's identifier through the assembled balancer (integration) | comes back unchanged |
 | The balancer and one mock backend, run for real | the answer carries the generated identifier; the debug line `request served` carries it as `request_id`; a client's `order-7` appears in both; the failure lines of an unreachable backend carry it too |
+
+## A distribution test that depended on health checking
+
+**Why.** CI failed in `TestRoundRobinSpreadsTrafficEvenly`: over 100 requests and ten backends, two
+backends served 9 and two served 11. Every request was answered 200, so nothing had failed for the
+client; round robin had simply not been given ten equal turns. The same assumption sat in seven
+tests, which assert an exact or bounded share per backend.
+
+### What the cause turned out to be
+
+The tests' configuration probes every 10ms with a 5ms timeout and an unhealthy threshold of 2. On a
+loaded runner two probes in a row time out, the backend leaves the pool for a few milliseconds, and
+its turns go to whichever backend the strategy picks instead. Client traffic never notices: the
+backend is answering, only slowly.
+
+The mechanism was reproduced deliberately rather than guessed at. One backend was made to answer in
+20ms — slow enough to time out every 5ms probe, fast enough to serve every request — while traffic
+kept flowing. `/status` reported nine healthy backends in 37 of 40 samples, the distribution came
+out 11, 11, 11 and 7, and all 100 requests were answered 200: the shape CI reported, exaggerated.
+
+### The fix
+
+`pinHealth` in the test harness puts the unhealthy threshold out of reach, so no backend can leave
+the pool mid-run. It is applied to the tests that measure distribution — the five in
+`balancing_test.go`, the algorithm switch in `reload_test.go` and the metrics test in
+`proxying_test.go` — and nowhere else: the resilience tests are about health checking and must keep
+their own thresholds.
+
+An earlier attempt raised the probe timeout to two seconds instead. The configuration rejected it:
+the timeout must be shorter than the interval. The threshold alone is enough, and
+`proxying_test.go` already used it that way for a different reason.
+
+This also makes two least connections tests honest. They slow a backend by 40ms on purpose and
+assert it stays in rotation while taking less traffic; with the old timings that backend's probes
+failed too, so health checking could have been what moved the load.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| The experiment above, with the threshold pinned | ten healthy backends in 40 of 40 samples, exactly 10 requests each |
+| `go test -race ./...` | green |
+| The seven distribution tests, 30 runs on 2 CPUs with the race detector | green |
+| `golangci-lint run ./...` | no issues |
