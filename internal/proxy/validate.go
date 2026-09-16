@@ -14,7 +14,8 @@ import (
 func validateRequest(metrics *observability.Metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if suspiciousFraming(r) {
-			slog.Warn("rejected an ambiguously framed request", "path", r.URL.Path)
+			slog.Warn("rejected an ambiguously framed request", "path", r.URL.Path,
+				"request_id", requestIDFrom(r.Context()))
 			metrics.ObserveRejection("bad_framing")
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
