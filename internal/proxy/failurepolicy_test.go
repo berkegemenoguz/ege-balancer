@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -308,5 +309,112 @@ func TestEveryBackendUnhealthyStillAttemptsThePool(t *testing.T) {
 	}
 	if served != 1 {
 		t.Errorf("the backend served %d requests, want 1", served)
+	}
+}
+
+// silentBackend reads a request, counts it, and closes the connection without
+// answering, as a backend that carried the request out and then died would.
+//
+// The counter is atomic because there is no answer to synchronise with: the
+// connection is closed, so the write here and the test's read are otherwise
+// unordered.
+func silentBackend(t *testing.T, received *atomic.Int64) *balancer.Backend {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		received.Add(1)
+		if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	return &balancer.Backend{Addr: strings.TrimPrefix(server.URL, "http://")}
+}
+
+// retryingConfig is a retry_next_backend configuration with two retries.
+func retryingConfig() *config.Config {
+	cfg := testConfig()
+	cfg.FailurePolicy = config.RetryNextBackend
+	cfg.Retry.MaxRetries = 2
+	return cfg
+}
+
+func TestPostIsNotRetriedOnceABackendHasTheRequest(t *testing.T) {
+	var received atomic.Int64
+	var served int
+	backends := []*balancer.Backend{silentBackend(t, &received), echoBackend(t, "backend-2", &served)}
+
+	response := send(New(retryingConfig(), balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
+		httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader("one order")))
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d rather than a second order",
+			response.Code, http.StatusServiceUnavailable)
+	}
+	if got := received.Load(); got != 1 {
+		t.Errorf("the failing backend received %d requests, want 1", got)
+	}
+	if served != 0 {
+		t.Errorf("the second backend served %d requests, want none", served)
+	}
+}
+
+func TestGetIsRetriedAfterTheSameFailure(t *testing.T) {
+	var received atomic.Int64
+	var served int
+	backends := []*balancer.Backend{silentBackend(t, &received), echoBackend(t, "backend-2", &served)}
+
+	response := send(New(retryingConfig(), balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
+		httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if response.Code != http.StatusOK {
+		t.Errorf("status = %d, want an idempotent request retried past the failure", response.Code)
+	}
+	if served != 1 {
+		t.Errorf("the second backend served %d requests, want 1", served)
+	}
+}
+
+func TestPostIsRetriedWhenNoConnectionWasMade(t *testing.T) {
+	var served int
+	backends := []*balancer.Backend{{Addr: unreachable}, echoBackend(t, "backend-2", &served)}
+
+	response := send(New(retryingConfig(), balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
+		httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader("one order")))
+
+	if response.Code != http.StatusOK {
+		t.Errorf("status = %d, want the retry allowed when nothing received the request", response.Code)
+	}
+	if served != 1 {
+		t.Errorf("the second backend served %d requests, want 1", served)
+	}
+}
+
+func TestPostIsNotRetriedOnAFivexxAnswer(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer failing.Close()
+
+	var served int
+	backends := []*balancer.Backend{
+		{Addr: strings.TrimPrefix(failing.URL, "http://")},
+		echoBackend(t, "backend-2", &served),
+	}
+
+	cfg := retryingConfig()
+	cfg.RetryOn5xx = true
+
+	response := send(New(cfg, balancer.NewRoundRobin(), backends, allHealthy, testMetrics()),
+		httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader("one order")))
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d: the backend answered, so it had the request",
+			response.Code, http.StatusServiceUnavailable)
+	}
+	if served != 0 {
+		t.Errorf("the second backend served %d requests, want none", served)
 	}
 }
