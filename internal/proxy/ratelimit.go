@@ -57,7 +57,8 @@ func (l *rateLimiter) setRate(perSecond int) {
 func (l *rateLimiter) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if client := clientAddr(r); !l.allow(client, time.Now()) {
-			slog.Info("client over the rate limit", "client", client, "path", r.URL.Path)
+			slog.Info("client over the rate limit", "client", client, "path", r.URL.Path,
+				"request_id", requestIDFrom(r.Context()))
 			l.metrics.ObserveRejection("rate_limited")
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
