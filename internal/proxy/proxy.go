@@ -72,12 +72,14 @@ func New(
 	return &Handler{
 		core:    core,
 		limiter: limiter,
-		serve:   limiter.wrap(validateRequest(metrics, core)),
+		// The identifier is assigned outermost, so that a request refused by the
+		// rate limiter or the validator can be traced like any other.
+		serve: withRequestID(limiter.wrap(validateRequest(metrics, core))),
 	}
 }
 
-// Handler is the served chain: rate limiting, request validation, then the
-// proxy core. It is the type a reload is applied to.
+// Handler is the served chain: the request identifier, rate limiting, request
+// validation, then the proxy core. It is the type a reload is applied to.
 type Handler struct {
 	core    *Core
 	limiter *rateLimiter
@@ -137,6 +139,9 @@ func (c *Core) newReverseProxy(cfg *config.Config, backendCount int) *httputil.R
 			// Replaces any X-Forwarded-For sent by the client, so that a client
 			// cannot forge the address the backend sees.
 			r.SetXForwarded()
+			// The backend logs the same identifier as the balancer, which is what
+			// makes one request traceable across both.
+			r.Out.Header.Set(requestIDHeader, requestIDFrom(r.In.Context()))
 		},
 		Transport:  transport(cfg, backendCount),
 		BufferPool: newBufferPool(),
@@ -184,7 +189,8 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		retry := n > 0
 		if retry {
 			if !active.budget.tryRetry() {
-				slog.Warn("retry budget exhausted, not retrying", "method", r.Method, "path", r.URL.Path)
+				slog.Warn("retry budget exhausted, not retrying", "method", r.Method, "path", r.URL.Path,
+					"request_id", requestIDFrom(r.Context()))
 				c.metrics.ObserveRejection("retry_budget_exhausted")
 				unavailable(w)
 				return
@@ -192,22 +198,35 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.metrics.ObserveRetry()
 		}
 
-		served := c.serve(w, r, active, backend, body)
+		served, attemptErr := c.serve(w, r, active, backend, body)
 		if retry {
 			active.budget.retryFinished()
 		}
 		if served {
 			return
 		}
+
+		// Another attempt would be made, but the request may already have been
+		// carried out by the backend that just failed.
+		if n+1 < active.attempts && !retryable(r.Method, attemptErr) {
+			slog.Warn("not retrying a request the backend may have carried out",
+				"method", r.Method, "path", r.URL.Path, "backend", backend.Addr,
+				"request_id", requestIDFrom(r.Context()))
+			c.metrics.ObserveRejection("not_retryable")
+			unavailable(w)
+			return
+		}
 	}
 
-	slog.Warn("no backend could serve the request", "method", r.Method, "path", r.URL.Path)
+	slog.Warn("no backend could serve the request", "method", r.Method, "path", r.URL.Path,
+		"request_id", requestIDFrom(r.Context()))
 	c.metrics.ObserveRejection("no_backend_available")
 	unavailable(w)
 }
 
-// serve makes one attempt and reports whether the client was answered.
-func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, backend *balancer.Backend, body []byte) bool {
+// serve makes one attempt and reports whether the client was answered, and the
+// error that failed the attempt if it was not.
+func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, backend *balancer.Backend, body []byte) (bool, error) {
 	// The counter is what least connections balances on, so it must cover the
 	// whole request, not just the choice.
 	backend.Acquire()
@@ -227,16 +246,18 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, b
 		active.breaker.recordSuccess(backend.Addr)
 		c.metrics.ObserveRequest(backend.Addr, strconv.Itoa(current.status), took)
 		slog.Debug("request served", "method", r.Method, "path", r.URL.Path,
-			"backend", backend.Addr, "status", current.status, "duration", took)
-		return true
+			"backend", backend.Addr, "status", current.status, "duration", took,
+			"request_id", requestIDFrom(r.Context()))
+		return true, nil
 	}
 
 	c.checker.ReportFailure(backend.Addr)
 	active.breaker.recordFailure(backend.Addr)
 	c.metrics.ObserveBackendFailure(backend.Addr)
 	slog.Warn("backend attempt failed", "method", r.Method, "path", r.URL.Path,
-		"backend", backend.Addr, "error", current.err)
-	return false
+		"backend", backend.Addr, "error", current.err,
+		"request_id", requestIDFrom(r.Context()))
+	return false, current.err
 }
 
 // available returns the backends that may serve the request now: healthy, not
