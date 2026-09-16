@@ -48,6 +48,10 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
       for latency, `circuit_breaker` to protect a struggling backend
 - [ ] Under `retry_next_backend`, `retry.budget_percent` is the extra load the backends can take
       when they start failing, and `retry.min_retry_concurrency` covers the quietest traffic
+- [ ] Clients that send POST or PATCH handle a 503: a request a backend may already have carried
+      out is refused rather than retried, so the client decides whether repeating it is safe
+- [ ] The backends log the `X-Request-Id` they are sent, so a request can be followed from the
+      balancer's logs into theirs
 - [ ] `enable_pprof` is false, or the metrics port is unreachable from outside
 - [ ] The metrics port is not exposed publicly
 - [ ] A liveness check, if the platform restarts unhealthy containers, uses `/healthz`, never
@@ -65,6 +69,8 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
       the limits or the health thresholds need revisiting
 - [ ] `retry_budget_exhausted` appears only while backends are failing; the budget is doing its
       job then, and the backends are what needs attention
+- [ ] `not_retryable` is flat; a rising count means backends are dropping requests they have
+      already received, which is a backend problem rather than a balancer one
 - [ ] p99 latency is within the target under real traffic
 - [ ] A rolling restart of one backend causes no client-visible errors
 
