@@ -267,3 +267,46 @@ runs it against `/healthz` as the container's health check.
 nor `/status` answers. Liveness and readiness are separate because a balancer whose backends are
 all down is still working: restarting it would bring no backend back. The probe flag gives the
 image a health check without adding anything to it.
+
+---
+
+## 15. Requests that are not idempotent are retried only before a backend has them
+
+**Section 5.5.** After v1.2.
+
+The document's `retry_next_backend` retries a failed attempt on another backend whatever the
+request was, bounded only by `max_retries`.
+
+**What is done instead:** an idempotent request (GET, HEAD, PUT, DELETE, OPTIONS, TRACE) is still
+retried after any failure. A request that is not — POST, PATCH, or a method the balancer does not
+know — is retried only when the connection was never made, which is the one failure that proves no
+backend saw it. Any later failure ends the request with 503, counted as `not_retryable`.
+
+**Why:** a backend can carry a request out and then fail before its answer reaches the balancer, or
+answer 5xx with `retry_on_5xx` set. The balancer cannot tell that apart from a request that never
+arrived, so retrying a POST can place a second order or take a second payment. RFC 9110 draws the
+same line, and nginx (`non_idempotent` off by default) and Envoy behave this way. The rule is in the
+code rather than in the configuration: this project has consistently declined to offer a switch for
+the unsafe behaviour.
+
+---
+
+## 16. Every request carries an identifier
+
+**Section 7.6.** After v1.2.
+
+The document's observability is metrics and structured logs. Nothing tied a line in the balancer's
+log to the same request in a backend's log, or gave a client anything to quote when reporting a
+failed request.
+
+**What is done instead:** every request is given an identifier. It is taken from the client's
+`X-Request-Id` header when that is printable ASCII of at most 64 characters, and generated from
+`crypto/rand` otherwise. It is returned to the client, sent on to the backend in the same header,
+and logged as `request_id` on every line about that request.
+
+**Why:** with ten backends and retries, a failed request appears in several logs, and without a
+shared key they cannot be lined up. A client's own identifier is kept so that a trace which started
+before the balancer survives it; it is bounded and checked because it reaches the logs of every
+backend, and an unbounded or control-character value is a way to make those logs unreadable. The
+identifier is assigned before rate limiting and validation, so a request the balancer refuses
+itself can be traced as well as one it forwards.
