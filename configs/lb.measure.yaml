@@ -1,0 +1,73 @@
+# Configuration for the measurements in docs/performance-report.md, mounted
+# into the container by deploy/docker-compose.measure.yml.
+#
+# It differs from configs/lb.example.yaml in three ways, each of which would
+# otherwise measure something other than the balancer:
+#
+#   - Rate limiting is off. The load comes from one address, so a per-client
+#     limit refuses nearly everything and the run measures the limiter.
+#   - The weights are proportional to each backend's capacity (capacity/16), so
+#     that a weighted round robin run has weights worth following.
+#   - Logging is at warn. At tens of thousands of requests a second, an info
+#     line per request costs more than the forwarding does.
+
+listen_addr: ":8080"
+metrics_addr: ":8081"
+enable_pprof: false
+algorithm: least_connections              # the measurement script rewrites this
+failure_policy: retry_next_backend
+retry_on_5xx: false                 # a mock's 503 means it is full; retrying hides that
+
+retry:
+  max_retries: 2
+  budget_percent: 20
+  min_retry_concurrency: 3
+
+circuit_breaker:
+  failure_threshold: 5
+  open_duration: 30s
+
+backends:
+  - addr: "backend-1:5678"
+    weight: 4
+  - addr: "backend-2:5678"
+    weight: 4
+  - addr: "backend-3:5678"
+    weight: 4
+  - addr: "backend-4:5678"
+    weight: 4
+  - addr: "backend-5:5678"
+    weight: 4
+  - addr: "backend-6:5678"
+    weight: 4
+  - addr: "backend-7:5678"
+    weight: 2
+  - addr: "backend-8:5678"
+    weight: 2
+  - addr: "backend-9:5678"
+    weight: 1
+  - addr: "backend-10:5678"
+    weight: 4
+
+health_check:
+  path: "/healthz"
+  interval: 2s
+  timeout: 1s
+  healthy_threshold: 2
+  unhealthy_threshold: 3
+
+timeouts:
+  connect_timeout: 2s
+  response_timeout: 10s
+  read_timeout: 10s
+  write_timeout: 10s
+  idle_timeout: 60s
+
+limits:
+  max_connections: 10000
+  max_request_body_bytes: 10485760
+  rate_limit_per_ip: 0
+
+logging:
+  level: warn
+  format: json
