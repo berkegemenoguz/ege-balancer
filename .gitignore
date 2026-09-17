@@ -1,6 +1,7 @@
 # Binaries
 /bin/
 /lb
+/loadgen
 *.exe
 
 # Test and profiling output
@@ -18,3 +19,6 @@ coverage.*
 .idea/
 .vscode/
 .claude/
+
+# Load test results (docs/performance-report.md quotes the numbers)
+/measurements/
