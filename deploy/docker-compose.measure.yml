@@ -1,0 +1,9 @@
+# Overlay for the measurements in docs/performance-report.md: the balancer reads
+# configs/lb.measure.yaml instead of the example configuration, so a run cannot
+# be spoiled by whatever the demo console last left in the example file.
+#
+#   docker compose -f deploy/docker-compose.yml \
+#                  -f deploy/docker-compose.measure.yml up -d
+services:
+  loadbalancer:
+    volumes: ["../configs/lb.measure.yaml:/etc/lb/config.yaml:ro"]
