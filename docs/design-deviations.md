@@ -154,8 +154,10 @@ goroutine per connection, keep-alive throughout, percentiles from recorded laten
 pointed at a backend directly first, at 108,000 requests per second, to establish that the
 measurements describe the balancer rather than the generator.
 
-The driver was not kept in the repository: it exists to produce one report, and the report
-carries its numbers.
+**Corrected after v1.3.** The driver was not kept, and the report's numbers became unverifiable
+with it. The generator is now `cmd/loadgen`, part of the repository, along with the measurement
+configuration and the scripts that drive it, and the whole campaign was repeated against the
+profiled mock backends of entry 13. The second campaign is the one the report leads with.
 
 ---
 
