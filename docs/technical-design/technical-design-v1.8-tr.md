@@ -7,7 +7,7 @@
 | Yazar | Berk Egemen Oğuz |
 | Tarih | 11 Eylül 2026 |
 | Sürüm | 1.8 — v1.6'nın ve v1.7 revizyon notlarının yerini alır |
-| Durum | Yayınlanan v1.0.0'ı ve o günden bu yana yapılan üç eklemeyi anlatır: regresyon korumalı benchmark'lar, retry budget ve power of two choices (§5.4) |
+| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2) ve profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8); v1.3.0'a kadar |
 | Kod | `github.com/berkegemenoguz/ege-balancer` |
 | Dil | Türkçe. Aynı içerikteki İngilizce sürüm: [technical-design-v1.8-en.md](technical-design-v1.8-en.md) |
 
@@ -33,7 +33,13 @@ two choices ile değiştiriyoruz — rastgele iki backend örneklemek ve daha az
 değişiklik havuzdaki ilk backend'e doğru olan yanlılığı ortadan kaldırdı (önce 100 ardışık isteğin
 100'ü, sonra en fazla 18'i), seçim maliyetini havuz boyutundan bağımsız hale getirdi (10, 100 ve
 1.000 backend'de 14 ns; taramada 1.000 backend'de 484 ns) ve sürekli yük altında yavaş backend'lerden
-kaçınmayı korudu.
+kaçınmayı korudu. İkinci bir ölçüm kampanyası, gerçekçi gecikme ve kapasitelere sahip backend'lere
+karşı üç stratejiyi tek tip olmayan bir havuzda karşılaştırır. Eşit olmayan bir havuzda eşit pay,
+throughput'u en zayıf backend ile sınırlar: round robin trafiğin %10'unu kapasitenin %3'ünü temsil
+eden bir backend'e gönderir ve 100 bağlantıda isteklerin %3,6'sını reddeder; aynı noktada kapasiteye
+oranlı ağırlıklar ve least connections %72 daha fazla isteği hiç ret vermeden cevaplar. Least
+connections'ın sinyalini nerede yitirdiğini de gösteriyoruz: anında reddeden aşırı yüklü bir backend
+uçuşta hiçbir istek tutmadığı için boşta görünür.
 
 ---
 
@@ -667,6 +673,10 @@ kullanıldı — bağlantı başına bir goroutine, keep-alive, istek başına g
 değil yük dengeleyiciyi anlattığını doğrulamak için sürücü önce doğrudan bir backend'e karşı
 saniyede 108.000 istekle denendi.
 
+v1.3.0'dan sonra yapılan ikinci bir kampanya, yük dengeleyicinin kendi maliyetini değil üç
+algoritmayı karşılaştırmak için aynı ölçümleri profilli mock backend'lere (§9.4) karşı tekrarladı.
+Yöntemi ve sonuçları §10.8'dedir; üreticisi `cmd/loadgen` repodadır, yani yeniden çalıştırılabilir.
+
 ### 10.2 Darboğazlar
 
 İlk çalıştırma backend'lerin tek başına verdiğinden çok daha kötüydü: 100 bağlantıda saniyede
@@ -792,6 +802,88 @@ durum için entegrasyon paketine bir test eklendi.
 
 ---
 
+### 10.8 Tek tip olmayan bir havuzda algoritmalar
+
+Yukarıdaki ölçümler on baytı mikrosaniyede döndüren on özdeş backend kullandı. Bu, yük
+dengeleyicinin kendi darboğazlarını bulmak için doğru, stratejileri karşılaştırmak için yanlış bir
+kurgudur: hiçbir zaman uçuşta istek olmaz, dolayısıyla least connections'ın okuyacağı bir sinyal
+yoktur ve her backend eşit olduğu için ağırlıklar ile kapasite farkları hiç sınanmaz. Bu kampanya,
+Compose içindeki sürüm imajını §9.4'teki on profilli mock backend'e karşı, makinede çalışan
+`cmd/loadgen` ile sürüyor: bağlantı başına bir goroutine, keep-alive, kapalı döngü, atılan beş
+saniyelik ısınma ve ölçülen yirmi saniye.
+
+Havuzu yük dengeleyiciden önce profiller sınırlıyor. On backend aynı anda 528 isteğe hizmet ediyor
+ve 1.056 isteği kuyruğa alıyor; bunun ötesinde bir backend hemen 503 döndürüyor. Yavaş backend —
+kapasite 16, medyan 80 ms — bu kapasitenin %3,0'ını ve saniyede yaklaşık 200 isteği temsil ediyor.
+
+| Bağlantı | Algoritma | Cevaplanan | p95 | p99 | Reddedilen | Yavaş backend'in payı |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100 | round robin | 2.141/s | 253,0 ms | 397,9 ms | %3,6 | %10,0 |
+| 100 | weighted round robin | 3.660/s | 71,7 ms | 150,6 ms | yok | %3,0 |
+| 100 | least connections | 3.677/s | 71,2 ms | 151,0 ms | yok | %2,8 |
+| 300 | round robin | 5.523/s | 107,0 ms | 334,3 ms | %7,6 | %10,0 |
+| 300 | weighted round robin | 5.082/s | 126,5 ms | 325,4 ms | %0,3 | %3,0 |
+| 300 | least connections | 5.352/s | 114,2 ms | 177,4 ms | yok | %2,6 |
+| 2.000 | round robin | 3.518/s | 2,248 s | 2,930 s | %6,4 | %10,0 |
+| 2.000 | weighted round robin | 3.292/s | 2,691 s | 3,586 s | yok | %3,0 |
+| 2.000 | least connections | 3.266/s | 2,661 s | 3,251 s | %6,0 | %10,1 |
+
+Her değer üç koşunun medyanıdır; 50'den 2.000 bağlantıya kadar altı seviye ölçüldü ve elli dört
+koşunun tamamı performans raporundadır. Algoritmalar her seviyede araya alınarak koşuyor ve sıraları
+her tekrarda döndürülüyor; çünkü onları blok blok koşan ilk deneme boyunca throughput istikrarlı
+biçimde düştü ve bu, ilk ölçülen algoritmaya haksız avantaj verecekti. Beş sonuç önemlidir.
+
+**Eşit olmayan bir havuzda eşit pay, havuzu en zayıf üyesiyle sınırlar.** Round robin'in dağılımı
+her seviyede backend başına %10,0, üç haneye kadar: strateji tam olarak vaat ettiğini yapıyor. Ama
+yavaş backend havuzun %3,0'ıdır; bu yüzden 100 bağlantıdan itibaren kapasitesini aşıp reddetmeye
+başlıyor ve round robin'in bütün 503'leri ondan geliyor — 100 bağlantıda isteklerin %3,6'sı, üstündeki
+her seviyede %6,4 ile %7,6 arası. Bu, gerçekleştirim hakkında değil, strateji seçimi hakkında bir
+sonuçtur.
+
+**Ağırlıklar ile least connections aynı dağılıma farklı yollardan varıyor.** Weighted round robin
+yavaş backend'e, yapılandırıldığı kapasiteye oranlı ağırlığın karşılığı olan %3,0'ı verdi. Least
+connections ise kapasite hakkında hiçbir şey bilmeden %2,6-3,1 aralığına vardı: yavaş bir backend
+isteklerini daha uzun tuttuğu için daha meşgul görünür ve daha az seçilir. Havuzun kapasitesinin
+altında bu, 50 bağlantıda %41, 100 bağlantıda %72 daha fazla cevaplanan istek demek — 2.141/s'ye
+karşı 3.677/s — üstelik %3,6'ya karşı sıfır ret ve 253 ms'ye karşı 71 ms p95 ile.
+
+**Dizde üçü throughput'ta yakınlaşır, geri kalan her şeyde ayrışır.** Havuzun 528 eşzamanlı isteğine
+yakın olan 300 bağlantıda üçü birbirinin %8'i içinde; ama round robin isteklerin %7,6'sını reddediyor
+ve p99'u least connections'ın 177 ms'sine karşı 334 ms. Dizin üstünde round robin diğerlerinden bir
+miktar fazla cevaplıyor, karşılığında %6,4-6,8 reddediyor: aşırı yüklü bir mock mikrosaniyede
+reddettiği için yükü atmak neredeyse bedavadır ve bağlantıyı yeni bir istek için serbest bırakır.
+Cevapları retlerden ayırmayan bir throughput sayısı tam olarak bunu ödüllendirir.
+
+**Least connections derin aşırı yükte sinyalini yitirir.** Yavaş backend'e verdiği pay 300
+bağlantıda %2,6, 1.000'de %5,3 ve 2.000'de %10,1 — yani artık round robin'den iyi değil ve %6,0 ret
+veriyor. Sebep aynı ani rettir: kuyruğu dolan backend hemen 503 döndürür, uçuştaki istek sayısı
+sıfıra iner ve havuzun en boş backend'i haline gelir. Uçuştaki istekleri saymak doluluğu ölçer ve ani
+bir ret, boşta olmaktan ayırt edilemez (§12).
+
+**Dizin üstünde en pahalı bileşen yük dengeleyicinin kendisidir.** Her pencere boyunca örneklenen
+`docker stats`, 300 bağlantıda yük dengeleyiciyi bir çekirdeğin %138'inde, on backend'in toplamını
+%137'sinde gösteriyor; 2.000 bağlantıda %165-187'ye karşı %116-125. İstemcinin o noktada gördüğü şey
+büyük ölçüde yük dengeleyicinin önündeki kuyruktur: yük dengeleyicinin kendi histogramı, istemci
+tarafında p95'i 2,9 s olan trafik için 241 ms bildiriyor, istemcinin dağılımı iki tepeli (50 ms ve
+2-5 s) ve saniyelerce süren bekleme 4 KiB dönen her backend'de aynı görünüyor — bu, seçimin
+arkasındaki değil önündeki bir kuyruğun şeklidir. Dolayısıyla o seviyedeki gecikme, yük
+dengeleyiciyi değil makineyi anlatır.
+
+**Yük dengeleyicinin kendisi ne yaptı.** On sekiz koşunun tamamında `lb_rejected_requests_total` ve
+`lb_retries_total` hiç hareket etmedi: istemcinin gördüğü her 503 bir backend'den geldi ve
+`retry_on_5xx` kapalı olduğu için yük dengeleyici bu yanıtları olduğu gibi iletti. Üretici her iki
+sayacı da ölçüm penceresinin iki ucunda okuyor, yani bu varsayım değil ölçümdür.
+
+**Bir backend'i kaybetmek tek haneli sayıda retry'a mal oluyor.** 600 bağlantıda algoritma başına
+bir koşuda, trafiğin %12'sini taşıyan hızlı bir backend ölçümün onuncu saniyesinde devre dışı
+bırakıldı: hem mock'un düzgün boşalttığı SIGTERM ile hem de açık her bağlantıyı koparan SIGKILL ile.
+Çökme bile yaklaşık 100.000 isteğin içinde yedi ile on retry'a mal oldu ve weighted round robin ile
+least connections altında istemci hiçbir hata görmedi. Bunu ucuz kılan şey pasif sağlık kontrolüdür:
+üst üste üç başarısız deneme backend'i havuzdan çıkarır ve bu hızlarda üç hata milisaniyeler sürer;
+aktif probe'un fark etmesi altı saniyeye kadar sürebilirdi.
+
+---
+
 ## 11. Tartışma
 
 ### 11.1 Sürümden sonra bulunan kusurlar
@@ -851,9 +943,10 @@ bu yüzden yalnızca bayt ve bellek ayırma sayıları kapı olarak kullanılır
   sayılar görür; bu yüzden yavaş bir backend, üzerinde istekler birikene kadar eşit pay alır (§10.7).
 - **TLS sonlandırma ve HTTP/2** kapsam dışında kalmaya devam ediyor; yük dengeleyici düz HTTP/1.1
   konuşur.
-- **Yük testi mock backend'lerden önce yapıldı.** §10.3'teki sayılar on baytlık gövde dönen basit
-  backend'lere karşı ölçüldü; bunları profilli mock backend'lere (§9.4) karşı tekrarlamak bir sonraki
-  ölçümdür.
+- **Backend başına uçuştaki istek sınırı yok.** İkinci kampanyanın bulduğu en belirgin eksik budur
+  (§10.8). Least connections havuz derin aşırı yüke girene kadar kapasiteyi izler, sonra aşırı yükün
+  yok ettiği bir sinyali izlemeye başlar: anında reddeden bir backend boşta görünür. Backend başına
+  bir kabul sınırı, stratejinin göremediğini sınırlandırırdı.
 - **Daha büyük bir havuz.** Ortamda on backend var. Otuz gibi daha büyük havuzlar için bir üreteç,
   power of two choices'ın taramayı geçtiği yerde ölçülmesini sağlar (§10.7).
 - **Tek düğüm.** Hız sınırları, devre durumu ve retry budget süreç başınadır; birkaç yük dengeleyici
