@@ -314,8 +314,10 @@ rather than editing the JSON.
 
 ## Performance
 
-Measured on a ten core machine that was also running the load generator and all ten backends,
-after the three bottlenecks the profiling found:
+Two things were measured, and they answer different questions.
+
+**What the balancer itself costs.** Against ten trivial backends answering ten bytes, on a ten core
+machine also running the generator and the backends:
 
 | Concurrent connections | Throughput | p50 | p95 | p99 |
 | --- | --- | --- | --- | --- |
@@ -323,8 +325,30 @@ after the three bottlenecks the profiling found:
 | 1,000 | 41,208 req/s | 23.6 ms | 46.7 ms | 60.2 ms |
 | 2,000 | 41,421 req/s | 47.3 ms | 87.5 ms | 106.6 ms |
 
-No request failed at any level. The [performance report](docs/performance-report.md) has the
-method, the bottlenecks and the numbers before and after each fix.
+No request failed at any level. Those figures are the balancer's own ceiling, reached after the
+three bottlenecks the profiling found.
+
+**What the algorithm is worth.** Against the ten profiled mock backends, where one backend is worth
+3% of the pool's capacity, at 100 connections:
+
+| Algorithm | Answered | p95 | Refused | Share to the slow backend |
+| --- | --- | --- | --- | --- |
+| round robin | 2,141 req/s | 253.0 ms | 3.6% | 10.0% |
+| weighted round robin | 3,660 req/s | 71.7 ms | none | 3.0% |
+| least connections | 3,677 req/s | 71.2 ms | none | 2.8% |
+
+Each figure is the median of three runs. At 300 connections, where the pool is near its capacity,
+the three come within 8% of each other on throughput — and round robin still refuses 7.6% of
+requests, with a p99 of 334 ms against least connections' 177 ms.
+
+Round robin is not misbehaving — an equal share is what it promises — but an equal share of an
+unequal pool saturates the weakest backend first. Least connections reaches the same distribution as
+capacity-proportional weights without being told anything about capacity.
+
+The [performance report](docs/performance-report.md) has both campaigns in full: the method, all
+fifty-four runs across six load levels, what happens when a backend is stopped or crashed mid-run,
+where least connections loses its signal, and why the client's p95 at 2,000 connections says more
+about the machine than about the balancer. `cmd/loadgen` and `scripts/measure.sh` reproduce them.
 
 ## Project layout
 
@@ -332,6 +356,7 @@ method, the bottlenecks and the numbers before and after each fix.
 cmd/lb/                    entry point: reads configuration, builds the logger, runs the app
 cmd/demo/                  terminal console for driving the demo environment
 cmd/mockbackend/           mock backend with profiles: latency, capacity, answer size, errors
+cmd/loadgen/               load generator behind the performance report
 internal/app/              wiring, shared by the binary and the integration tests
 internal/config/           configuration parsing, defaults, validation and reload rules
 internal/balancer/         Backend, the LBStrategy interface and the three algorithms
@@ -342,6 +367,7 @@ internal/observability/    structured logging, Prometheus metrics, status and pp
 internal/integration/      end-to-end tests over real sockets
 configs/                   example configurations
 deploy/                    compose environment, mock backend image, Prometheus and Grafana
+scripts/                   the measurement runs behind the performance report
 docs/                      design paper, development log, performance report and more
 ```
 
