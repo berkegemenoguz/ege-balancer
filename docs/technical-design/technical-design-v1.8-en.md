@@ -7,7 +7,7 @@
 | Author | Berk Egemen Oğuz |
 | Date | 11 September 2026 |
 | Version | 1.8 — supersedes v1.6 and the v1.7 revision notes |
-| Status | Describes v1.0.0 as released and the three additions made since: benchmarks with regression guards, the retry budget, and the power of two choices (§5.4) |
+| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), and the second measurement campaign against the profiled backends (§10.8), up to v1.3.0 |
 | Code | `github.com/berkegemenoguz/ege-balancer` |
 | Language | English. A Turkish edition with the same content is [technical-design-v1.8-tr.md](technical-design-v1.8-tr.md) |
 
@@ -33,6 +33,13 @@ the power of two choices — sampling two backends at random and taking the less
 removed a bias toward the first backend in the pool (100 of 100 sequential requests before, at most
 18 after), made selection cost independent of the pool size (14 ns at 10, 100 and 1,000 backends,
 against 484 ns for the scan at 1,000), and still keeps slow backends avoided under sustained load.
+A second measurement campaign, against backends with realistic latencies and capacities, compares
+the three strategies under a pool that is not uniform. An equal share of an unequal pool caps
+throughput at its weakest backend: round robin sends 10% of the traffic to a backend worth 3% of the
+capacity and refuses 3.6% of requests at 100 connections, where capacity-proportional weights and
+least connections each answer 72% more requests with none refused. We also show where least
+connections loses its signal — an overloaded backend that refuses instantly holds nothing in flight,
+and so looks idle.
 
 ---
 
@@ -660,6 +667,10 @@ per connection, keep-alive, per-request latency recorded — after being checked
 directly at 108,000 requests per second, to establish that the numbers describe the balancer and not
 the generator.
 
+A second campaign, after v1.3.0, repeated the exercise against the profiled mock backends (§9.4)
+to compare the three algorithms rather than the balancer's own cost. Its method and results are in
+§10.8; its generator, `cmd/loadgen`, is part of the repository, so it can be run again.
+
 ### 10.2 Bottlenecks
 
 The first run was far worse than the backends alone: 5,888 requests per second at 100 connections,
@@ -783,6 +794,88 @@ the integration suite.
 
 ---
 
+### 10.8 The algorithms against a pool that is not uniform
+
+The measurements above used ten identical backends answering ten bytes in microseconds. That is the
+right shape for finding the balancer's own bottlenecks and the wrong shape for comparing strategies:
+nothing is ever in flight, so least connections has no signal, and every backend is equal, so
+weights and capacity differences are never exercised. This campaign drives the release image, in
+Compose, against the ten profiled mock backends of §9.4, with `cmd/loadgen` on the host: one
+goroutine per connection, keep-alive, closed loop, a five second warmup discarded and twenty seconds
+measured.
+
+The profiles bound the pool before the balancer does. Together the ten backends serve 528 requests
+at once and queue 1,056 more; beyond that a backend answers 503 immediately. The slow backend —
+capacity 16, 80 ms median — is worth 3.0% of that capacity and about 200 requests per second.
+
+| Connections | Algorithm | Answered | p95 | p99 | Refused | Share to the slow backend |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100 | round robin | 2,141/s | 253.0 ms | 397.9 ms | 3.6% | 10.0% |
+| 100 | weighted round robin | 3,660/s | 71.7 ms | 150.6 ms | none | 3.0% |
+| 100 | least connections | 3,677/s | 71.2 ms | 151.0 ms | none | 2.8% |
+| 300 | round robin | 5,523/s | 107.0 ms | 334.3 ms | 7.6% | 10.0% |
+| 300 | weighted round robin | 5,082/s | 126.5 ms | 325.4 ms | 0.3% | 3.0% |
+| 300 | least connections | 5,352/s | 114.2 ms | 177.4 ms | none | 2.6% |
+| 2,000 | round robin | 3,518/s | 2.248 s | 2.930 s | 6.4% | 10.0% |
+| 2,000 | weighted round robin | 3,292/s | 2.691 s | 3.586 s | none | 3.0% |
+| 2,000 | least connections | 3,266/s | 2.661 s | 3.251 s | 6.0% | 10.1% |
+
+Each figure is the median of three runs; six levels from 50 to 2,000 connections were measured, and
+the performance report carries all fifty-four. The algorithms are interleaved at each level and
+their order rotated each repeat, because a first attempt that ran them in blocks drifted downwards
+through the session and would have credited whichever went first. Five results matter.
+
+**An equal share of an unequal pool caps the pool at its weakest member.** Round robin's
+distribution is 10.0% per backend at every level, to three digits: the strategy does exactly what it
+promises. But the slow backend is worth 3.0%, so from 100 connections it is past its capacity and
+refusing, and every one of round robin's 503s comes from it — 3.6% of requests at 100 connections and
+6.4% to 7.6% at every level above. This is a result about choosing a strategy, not about the
+implementation.
+
+**Weights and least connections find the same distribution by different means.** Weighted round
+robin gave the slow backend 3.0%, the capacity-proportional weight it was configured with. Least
+connections arrived at 2.6–3.1% told nothing about capacity: a slower backend holds its requests
+longer, so it looks busier and is chosen less. Below the pool's capacity that is worth 41% more
+answered requests at 50 connections and 72% at 100 — 3,677/s against 2,141/s — with no refusals
+against 3.6% and p95 of 71 ms against 253 ms.
+
+**At the knee the three converge on throughput and separate on everything else.** At 300
+connections, near the pool's 528 concurrent requests, they are within 8% of each other, but round
+robin refuses 7.6% and its p99 is 334 ms against least connections' 177 ms. Above the knee round
+robin answers slightly more than the others while refusing 6.4% to 6.8%: an overloaded mock refuses
+in microseconds, so shedding load is cheap and frees the connection for another request. A
+throughput figure that does not separate answers from refusals rewards exactly that.
+
+**Least connections loses its signal under deep overload.** Its share to the slow backend goes 2.6%
+at 300 connections, 5.3% at 1,000 and 10.1% at 2,000 — by then no better than round robin, with 6.0%
+refused. The cause is the same instant refusal: a backend whose queue is full answers 503 at once,
+its in-flight count drops to nothing, and it becomes the least busy backend in the pool. Counting
+requests in flight measures occupancy, and an instant refusal is indistinguishable from idleness
+(§12).
+
+**The balancer is the most expensive component above the knee.** Sampling `docker stats` through
+each window puts the balancer at 138% of a core at 300 connections against 137% for all ten backends
+together, and at 165–187% against 116–125% at 2,000. What the client sees then is mostly queueing in
+front of it: the balancer's own histogram reports p95 of 241 ms for traffic whose client-side p95 is
+2.9 s, the client's distribution has two humps — 50 ms and 2–5 s — and the seconds-long wait appears
+on every backend answering 4 KiB, which is the shape of a queue before the choice rather than behind
+it. The latency at that level therefore describes the machine, not the balancer.
+
+**What the balancer itself did.** Across all eighteen runs `lb_rejected_requests_total` and
+`lb_retries_total` did not move: every 503 the client saw came from a backend, and with
+`retry_on_5xx` off the balancer passed those answers through. The generator reads both counters at
+the ends of the measured window, so this is measured rather than assumed.
+
+**Losing a backend costs single-digit retries.** One run per algorithm at 600 connections had a fast
+backend carrying 12% of the traffic taken away ten seconds into the measurement, both by SIGTERM,
+which the mock drains, and by SIGKILL, which resets every open connection. Even the crash cost
+between seven and ten retries out of roughly 100,000 requests, with no client-visible error under
+either weighted round robin or least connections. Passive health checking is what makes it cheap:
+three consecutive failed attempts remove the backend, and at these rates three failures take
+milliseconds, where the active probe would have needed up to six seconds.
+
+---
+
 ## 11. Discussion
 
 ### 11.1 Defects found after the release
@@ -839,9 +932,10 @@ CI runners vary by several per cent, which is why only bytes and allocations are
 - **Least connections in a burst.** When many requests arrive at once, most selections see equal
   counts, so a slow backend receives an even share until requests build up on it (§10.7).
 - **TLS termination and HTTP/2** remain out of scope; the balancer speaks plain HTTP/1.1.
-- **The load test predates the mock backends.** The figures in §10.3 were measured against trivial
-  backends with a ten-byte body; repeating them against the profiled mock backends (§9.4) is the
-  next measurement.
+- **No limit on the requests in flight per backend.** This is the clearest gap the second campaign
+  found (§10.8). Least connections tracks capacity until the pool is deeply overloaded, and then
+  follows a signal that overload has destroyed: a backend refusing instantly looks idle. An
+  admission limit per backend would bound what the strategy cannot see.
 - **A larger pool.** The environment has ten backends. A generator for larger pools, such as thirty,
   would let the power of two choices be measured where it overtakes the scan (§10.7).
 - **Single node.** Rate limits, circuit state and the retry budget are per process; several balancer
@@ -857,7 +951,8 @@ CI runners vary by several per cent, which is why only bytes and allocations are
 Ege-Balancer meets the goals set for it: three strategies, health checking, configurable failure
 policies, reload without dropped connections, and observability, in a 22.6 MB non-root image,
 serving about 41,000 requests per second with no failed request on a machine it shared with its own
-load. The more durable result is the method. Each decision was written down before it was made;
+load (§10.3) — and, against backends with real latencies and capacities, keeping the pool's weakest
+member from setting its ceiling (§10.8). The more durable result is the method. Each decision was written down before it was made;
 each was measured where it could be; and each place where measurement disagreed with the design was
 recorded, fixed and, where possible, turned into a test that fails if the fix is undone. The three
 bottlenecks and all three post-release additions came from measurement, not speculation.
