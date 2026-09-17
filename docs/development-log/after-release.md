@@ -512,3 +512,107 @@ failed too, so health checking could have been what moved the load.
 | `go test -race ./...` | green |
 | The seven distribution tests, 30 runs on 2 CPUs with the race detector | green |
 | `golangci-lint run ./...` | no issues |
+
+## Measuring against the profiled backends
+
+**Why.** The performance report measured the balancer against ten trivial backends that answered
+ten bytes in microseconds. That found the balancer's own bottlenecks, which is what day 10 was for,
+but it could say nothing about the algorithms: nothing was ever in flight, so least connections had
+no signal, and every backend was identical, so weights and capacity differences were never
+exercised. The mock backends added after v1.1 have profiles; the measurements had never been
+repeated against them. The report also quoted a driver that had been thrown away, so nobody could
+reproduce it.
+
+### What was built
+
+- `cmd/loadgen`: one goroutine per connection, keep-alive, closed loop. It reports percentiles over
+  every recorded latency, the status codes, the share each backend served from its `X-Backend`
+  header, the balancer's own retry and refusal counters read at both ends of the measured window,
+  the latency distribution as a histogram, and each backend's own latencies.
+- `configs/lb.measure.yaml` and `deploy/docker-compose.measure.yml`: the measurement configuration,
+  mounted over the example one so a run cannot be spoiled by what the demo console last left there.
+- `scripts/measure.sh`, which drives three algorithms across six load levels, `REPEATS` times each,
+  interleaved and with `docker stats` sampled through every window; `scripts/measure-failure.sh`,
+  which takes a backend away mid-run, by SIGTERM or SIGKILL; and `scripts/summarise.py`, which turns
+  the results into the report's tables.
+- The second campaign in [the performance report](../performance-report.md): 54 matrix runs, 18
+  failure runs, and a dedicated run for the shape of the latency at 2,000 connections.
+
+### Decisions
+
+**The generator is committed this time.** The day 10 driver was a throwaway, and the report's
+numbers became unverifiable the moment it was deleted. Twenty seconds of load is worth little if
+nobody can run it again.
+
+**Closed loop, not a fixed rate.** A generator that sends a chosen number of requests per second
+measures the generator's choice. One that sends the next request when the last is answered measures
+what the pool delivers.
+
+**Three runs per cell, reported as a median with its range.** A single run cannot separate two
+figures a few per cent apart, and the mocks draw their latencies at random. The rule the report
+follows is that a gap narrower than the range is not a result — which is what keeps it from claiming
+that least connections beats weighted round robin at the knee, where they are 5% apart.
+
+**The algorithms are interleaved and their order rotated.** See below: measured in blocks, the
+campaign drifted.
+
+**Workers stop rather than being cut off.** The first version ended the run by cancelling the
+context, which cancelled requests in flight. Those failed every attempt inside the balancer and
+were counted there as refusals — 12 of them in an early run where the client saw none. Now each
+worker finishes its current request.
+
+**The warmup is discarded, and the counters are read inside the window.** Counters read before the
+warmup include what happened while connections were still being opened; an early run credited the
+measured window with 503s from its own warmup.
+
+**Weights proportional to capacity.** A weighted round robin run with weights of 1 would have
+measured round robin twice. The weights are `capacity / 16`, so 4, 2 and 1.
+
+### What went wrong
+
+**The first run measured the rate limiter.** The example configuration limits a client to 100
+requests per second, and the load comes from one address: 86,969 of 87,466 requests were answered
+429. The measurement configuration turns the limiter off, as day 10 did.
+
+**The failure experiment first measured a graceful drain.** `docker compose stop` sends SIGTERM,
+which the mock handles by finishing the requests it holds, so the balancer barely noticed. The
+script now takes `MODE=kill` as well, and both are reported. With three runs each, the two turn out
+to cost the same in retries, which the single run could not have shown.
+
+**The campaign drifted, and the first explanation was wrong.** Repeating the cells exposed it: a
+block-ordered campaign, four seconds between runs, lost throughput steadily through the session —
+six runs at 300 connections went from 5,405 to 3,395 answered per second. The first suspect was the
+new `docker stats` sampler perturbing the measurement, so it was tested: with the sampler the runs
+were *faster* (5,405, 5,221, 5,025) than without it (4,705, 3,713, 3,395), because the sampled group
+ran first. The decline was the session, not the sampler. Restarting every container did not recover
+it, the host had no sockets in `TIME_WAIT` and 56% of its memory free, and `pmset` had recorded no
+thermal event; host CPU frequency under sustained load is the remaining suspect, and confirming it
+needs root. The campaign answers it by design instead: the algorithms are interleaved at each level,
+their order rotates each repeat, and the gap between runs is eight seconds. Under those conditions
+the median cell held at 99.8% and 99.2% of its first run — no measurable drift. The block-ordered
+runs were kept under `measurements/block-order/` and are not what the report quotes.
+
+**The second wrong hypothesis was about the slow hump.** The client's p95 at 2,000 connections is
+2.9 s against a p50 of 54 ms, and the guess was that the backend answering 256 KiB was dragging the
+tail. Per-backend latencies said the opposite: that backend is the *only* one without a tail, at
+405 ms, while all nine answering 4 KiB sit between 2.91 and 3.19 s. The balancer's own histogram
+then located the wait — p95 of 241 ms inside the handler — so the seconds are spent in the
+connection backlog before the request is picked up, which is also why every 4 KiB backend shows the
+same figure.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Round robin's distribution, every level, three runs each | 10.0% per backend, to three digits |
+| Weighted round robin's share to the slow backend | 3.0% at every level: its capacity-proportional weight |
+| Least connections' share to the slow backend, up to 600 connections | 2.6–3.1%, with no weights configured |
+| Below the pool's capacity | 41% more answered requests at 50 connections, 72% at 100, with no refusals against round robin's 3.6% |
+| At the knee, 300 connections | the three within 8% on throughput; round robin refuses 7.6% and doubles the p99, 334 ms against 177 ms |
+| Least connections at 2,000 connections | 10.1% to the slow backend and 6.0% refused: an instant 503 leaves nothing in flight, so a full backend looks idle |
+| The balancer's own counters across all 54 matrix runs | unmoved: every 503 came from a backend, and none was retried |
+| Balancer CPU against the whole pool's, at 300 connections | 138% against 137% for all ten backends together |
+| The client's p95 at 2,000 connections against the balancer's own | 2.9 s against 241 ms: the wait is in the backlog, not in the balancer |
+| A backend drained or crashed under 600 connections of load | 6 to 28 retries out of about 90,000 requests, and no client-visible error under either weighted round robin or least connections |
+| Drift across the campaign | the median cell at 99.8% and 99.2% of its first run |
+| `cmd/loadgen` unit tests | percentiles, aggregation, failure classification, metric parsing, the histogram, per-backend timings, the warmup boundary and an unreachable target; 76.8% of statements |
