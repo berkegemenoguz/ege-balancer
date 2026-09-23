@@ -14,7 +14,7 @@
 listen_addr: ":8080"
 metrics_addr: ":8081"
 enable_pprof: false
-algorithm: least_connections              # the measurement script rewrites this
+algorithm: round_robin              # the measurement script rewrites this
 failure_policy: retry_next_backend
 retry_on_5xx: false                 # a mock's 503 means it is full; retrying hides that
 
@@ -58,7 +58,7 @@ health_check:
 
 timeouts:
   connect_timeout: 2s
-  response_timeout: 10s
+  response_timeout: 3s
   read_timeout: 10s
   write_timeout: 10s
   idle_timeout: 60s
