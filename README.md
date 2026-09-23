@@ -7,12 +7,12 @@ backends leave the pool on their own and come back when they recover, failures a
 policy you choose, and the whole system can be watched through structured logs, Prometheus metrics
 and Grafana dashboards.
 
-> Status: v1.3.0. The twelve day plan was released as v1.0.0, and the releases since have added a
+> Status: v1.3.1. The twelve day plan was released as v1.0.0, and the releases since have added a
 > retry budget and least connections by the power of two choices (v1.1.0); liveness and readiness
 > endpoints, a container health check, profiled mock backends and three Grafana dashboards
-> (v1.2.0); and a retry rule for requests that are not idempotent, with an identifier on every
-> request (v1.3.0). Everything below is implemented and tested, except where *Out of scope* says
-> otherwise.
+> (v1.2.0); a retry rule for requests that are not idempotent, with an identifier on every request
+> (v1.3.0); and fixes for three defects that realistic mock backends exposed (v1.3.1). Everything
+> below is implemented and tested, except where *Out of scope* says otherwise.
 
 ## Contents
 
@@ -88,15 +88,17 @@ Actions
   2  measure the distribution over 30 requests
   3  stop a backend            4  start a backend
   5  change the algorithm      6  demonstrate the rate limit
-  7  show the status           r  reset everything
-  q  quit                      ?  show this again
+  7  show the status           8  make a backend misbehave
+  r  reset everything          q  quit
+  ?  show this again
 ```
 
-The prompt shows the algorithm in force and whether traffic is flowing, so a change made several
-actions ago cannot quietly make the next measurement look wrong:
+The prompt shows the algorithm in force, whether traffic is flowing and which faults the console
+has started, so a change made several actions ago cannot quietly make the next measurement look
+wrong:
 
 ```
-[least_connections · traffic on] action?
+[least_connections · traffic on · backend-3 hanging 22s] action?
 ```
 
 A good first tour:
@@ -110,11 +112,14 @@ A good first tour:
 4. Press `3` and stop a backend. Its health timeline turns red after three failed checks, and the
    traffic moves to the others; `4` brings it back.
 5. Press `6` to watch the rate limit refuse a burst and let a second one through after it refills.
+6. Press `8`, choose a backend and make it hang for 30 seconds. The balancer abandons each hung
+   request after its response timeout and retries it on another backend; the
+   [Resilience dashboard](http://localhost:3000/d/ege-balancer-resilience) shows the retries.
 
 Every action prints the command it runs before running it, so anything the console does can be
 repeated by hand. The algorithm and rate limit actions edit `configs/lb.example.yaml` and send
-SIGHUP; `r` restores the file at any time, and `q` restores it on the way out and then asks
-whether to stop the stack. The [console's own page](cmd/demo/) has the details.
+SIGHUP; `r` restores the file and clears every backend's faults at any time, and `q` restores it
+on the way out, clears the faults the console started, and then asks whether to stop the stack. The [console's own page](cmd/demo/) has the details.
 
 It is a development tool: it drives Docker on your machine and never listens on a socket. It is
 not part of the container image.
@@ -142,6 +147,36 @@ curl -s localhost:5689 | head -1
 
 The profiles live in `deploy/docker-compose.yml`; every setting is a flag or a `MOCK_` environment
 variable, listed by `go run ./cmd/mockbackend -h`.
+
+Beyond their profiles, the backends can behave more like real services. All of it is off in the
+default stack:
+
+- **They remember their clients.** A request naming a session in `X-Session` is cheaper when the
+  backend has seen that session before, and the answer says `X-Cache: hit` or `miss`.
+- **They fail the way real services fail**: they hang without answering, drop the connection half
+  way through the answer, drip the answer out over seconds, answer 500, run several times slower,
+  or freeze entirely, health check included.
+- **They start cold and pause**: slower for a while after starting, and stopped for a moment now and
+  then, as a garbage collector stops a process.
+
+`deploy/docker-compose.realistic.yml` turns the steady versions on for every backend: 5,000
+remembered sessions each, faults on a fraction of a per cent of requests, a 30 second cold start,
+and a 150 ms pause every 15 seconds, at a different moment on each backend.
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.realistic.yml up -d --build
+```
+
+A fault can also be started on one backend for a while, from the console's `8` or by hand, through
+the backend's admin port. The admin ports are published on the loopback interface only, at 5781 to
+5790, and the balancer never forwards to them:
+
+```bash
+curl -s -X POST localhost:5783/faults -d 'mode=hang&rate=0.5&for=30s'
+```
+
+`GET /faults` lists what is in force and `DELETE /faults` clears it. Every fault ends on its own
+after the time it was given, at most ten minutes.
 
 ## Running it by hand
 
@@ -264,7 +299,14 @@ A request that is not idempotent — POST, PATCH, or a method the balancer does 
 only while nothing can have acted on it, which means the connection to the backend was never made.
 Once the request is on the wire the backend may have carried it out and answered into a connection
 that then broke, so sending it again could place a second order; the client receives 503 instead,
-counted as `not_retryable`. Idempotent requests are retried after any failure.
+counted as `not_retryable`. Idempotent requests are retried after any failure. A failure after the
+answer has started cannot be retried at all, whatever the method: the client's connection is closed,
+and the failure is counted against the backend.
+
+`timeouts.response_timeout` must be shorter than `timeouts.write_timeout`: once a stalled backend is
+abandoned, what is left of the write timeout is the time there is to answer the client from another.
+The shipped configurations use 3 s and 10 s, and the balancer logs a warning, at start and on every
+reload, for a configuration that does not keep that order.
 
 The numbers in both files are starting points; the [performance report](docs/performance-report.md)
 records what the load test says about them.
@@ -355,7 +397,7 @@ about the machine than about the balancer. `cmd/loadgen` and `scripts/measure.sh
 ```
 cmd/lb/                    entry point: reads configuration, builds the logger, runs the app
 cmd/demo/                  terminal console for driving the demo environment
-cmd/mockbackend/           mock backend with profiles: latency, capacity, answer size, errors
+cmd/mockbackend/           mock backend with profiles, memory, faults and an admin port
 cmd/loadgen/               load generator behind the performance report
 internal/app/              wiring, shared by the binary and the integration tests
 internal/config/           configuration parsing, defaults, validation and reload rules
