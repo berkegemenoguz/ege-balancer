@@ -4,7 +4,7 @@
 documentation.
 
 The documentation was brought up to date the day before, when the README was rewritten and the
-[design deviations](../design-deviations.md) were collected in one place. Today was the reload
+[design deviations](../technical-design/technical-design-v1.8-en.md#appendix-b--deviations-from-the-original-design) were collected in one place. Today was the reload
 and the resilience scenarios from section 10.4.
 
 ## What was built

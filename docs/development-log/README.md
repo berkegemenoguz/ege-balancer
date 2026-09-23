@@ -5,7 +5,8 @@ what was built, which decisions were taken and why, what went wrong on the way, 
 day's deliverable was verified.
 
 The design document states the plan; this log states what actually happened. Where the two
-differ, the reason is recorded here and collected in [design deviations](../design-deviations.md).
+differ, the reason is recorded here and collected in Appendix B of the
+[technical design](../technical-design/technical-design-v1.8-en.md#appendix-b--deviations-from-the-original-design).
 
 | Day | Focus | Page |
 | --- | --- | --- |

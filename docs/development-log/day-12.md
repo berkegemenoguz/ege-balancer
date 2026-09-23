@@ -58,7 +58,7 @@ a metric that looks wrong after a scrape change may be historical data rather th
 Otherwise nothing broke. The day was assembling parts whose behaviour was already established,
 and the checklist review found no criterion unmet except the one decided against deliberately on
 day 2: the branch and pull request flow, recorded as
-[deviation 1](../design-deviations.md).
+[deviation 1](../technical-design/technical-design-v1.8-en.md#appendix-b--deviations-from-the-original-design).
 
 ## Verification
 
@@ -83,5 +83,5 @@ The stack, with the balancer running as a container alongside the backends:
 | Memory | balancer 18 MiB of its 128 MB limit; Prometheus 42 MiB of 256 MB; Grafana 299 MiB of the 512 MB it had at the time |
 
 Grafana's limit was revisited afterwards: 512 MB was not enough once the dashboard refreshed
-every five seconds, and the fix was a memory budget rather than a higher ceiling. See
-[design deviations](../design-deviations.md).
+every five seconds, and the fix was a memory budget rather than a higher ceiling. See entry 7 of
+[the deviations](../technical-design/technical-design-v1.8-en.md#appendix-b--deviations-from-the-original-design).
