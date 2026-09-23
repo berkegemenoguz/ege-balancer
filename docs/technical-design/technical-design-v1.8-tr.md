@@ -1058,27 +1058,274 @@ olarak işaretlenmeyen her şey `SIGHUP` ile uygulanır.
 
 ## Ek B — Özgün tasarımdan sapmalar
 
-Her maddenin gerekçesi [`docs/design-deviations.md`](../design-deviations.md) dosyasındadır.
+Bu ek, sistemin özgün tasarımdan (v1.6) ayrıldığı her yerin kaydıdır. Her madde v1.6'nın ne
+dediğini, bunun yerine ne yapıldığını ve nedenini söyler; başlığın altındaki satır maddenin
+dokunduğu v1.6 bölümünü, kararın ne zaman alındığını ve belgenin gövdesinde sonucun nerede
+anlatıldığını verir. Her günün ayrıntısı geliştirme günlüğündedir.
 
-| # | Sapma | v1.6 bölümü | Bu belgede |
-| --- | --- | --- | --- |
-| 1 | Commit'ler doğrudan `main`'e gider; pull request yerine kapı CI'dır | 7.1, 7.3, 11 | §9.2 |
-| 2 | Weighted round robin olasılıksal değil, deterministiktir (smooth) | 5.3 | §5.2 |
-| 3 | Sağlık kontrolü arayüzü pasif yolu ve yenilemeyi taşır | 6.2 | §4.2 |
-| 4 | Tamamen sağlıksız havuz yine de denenir (panic mode) | 5.5 | §6.2 |
-| 5 | Şemaya `metrics_addr` ve `enable_pprof` eklendi | 3.3 | §7, Ek A |
-| 6 | Zaman aşımlarına `response_timeout` eklendi | 3.3 | §6.3, Ek A |
-| 7 | Grafana bir bellek bütçesine ihtiyaç duyar; yığın 5 sn'de bir scrape eder | 7.6 | §8.3 |
-| 8 | Yük testi `ab`'nin sınırının üzerinde amaca özel bir sürücü kullandı | 10.3 | §10.1 |
-| 9 | Gösterimler için bir demo konsolu eklendi | — | §4.2 |
-| 10 | Gecikme hedefi yük cinsinden yeniden ifade edildi | 10.3 | §10.3 |
-| 11 | Hata stratejilerine bir retry budget eklendi | 5.5 | §6.5 |
-| 12 | Least connections taramak yerine rastgele iki backend'i karşılaştırır | 5.2 | §5.4, §10.7 |
-| 13 | Mock backend'ler `http-echo` değil, profilleri olan projeye ait bir programdır | 8 | §9.4 |
-| 14 | Yük dengeleyici canlılık ve hazır olma sorgularına cevap verir, imajı kendini kontrol eder | 7.6 | §8.2 |
-| 15 | Idempotent olmayan bir istek, yalnızca bir backend onu almadan önce retry edilir | 5.5 | §6.3 |
-| 16 | Her istek, loglarda ve `X-Request-Id` başlığında bir kimlik taşır | 7.6 | §8.2 |
-| — | Epoll öğrenme egzersizi yapılmadı | 4.2 | §4.3 |
+### B.1 Commit'ler doğrudan main'e gider
+
+*v1.6 §7.1, §7.3 ve §11'deki sürüm kontrolü ölçütü · 2. gün · §9.2*
+
+**v1.6.** Korumalı bir `main`, `feature/<modül>` dalları ve CI'dan geçmiş bir pull request ile
+birleştirilen her değişiklik.
+
+**Bunun yerine.** Çalışma doğrudan `main`'e commit edilir ve CI pull request'lerde değil her
+push'ta çalışır. Kalite kapısı değişmedi: gofmt, `go vet`, golangci-lint, govulncheck, derleme ve
+bütün test paketi geçmeden hiçbir şey `main`'e ulaşmaz.
+
+**Neden.** Tek geliştirici ve gözden geçiren kimse yokken dal töreni hiçbir şey kazandırmaz. Ekip
+büyürse dal koruması ve pull request akışı yeniden açılmalıdır; hat, bir pull request'in ihtiyaç
+duyacağı her kontrolü zaten çalıştırıyor.
+
+### B.2 Weighted round robin deterministiktir
+
+*v1.6 §5.3 ve planın 5. gün satırı · 5. gün · §5.2*
+
+**v1.6.** Orantılı ve olasılıksal ağırlıklı seçim.
+
+**Bunun yerine.** Smooth weighted round robin. Her seçim her backend'in kredisini ağırlığı kadar
+artırır, en çok krediye sahip backend isteğe hizmet eder ve kredisi toplam ağırlık kadar düşer.
+
+**Neden.** Yapılandırılan oranı yaklaşık değil tam tutturur, rastgelelik kaynağına ihtiyaç duymaz ve
+ağır bir backend'in sıralarını yığmak yerine döngüye yayar: 5, 1, 1 ağırlıkları `a a b a c a a`
+verir. Testler istatistiksel değil kesin olur — 1, 2 ve 3 ağırlıkları üzerinden 1.200 istek tam
+olarak 200, 400 ve 600 üretir.
+
+### B.3 Sağlık kontrolü arayüzü pasif yolu taşır
+
+*v1.6 §6.2 · 6. gün, yenileme 11. günde eklendi · §4.2*
+
+**v1.6.** `Start(ctx, backends)` ve `IsHealthy(addr)`'den oluşan örnek bir arayüz.
+
+**Bunun yerine.** Arayüzde `ReportSuccess(addr)` ve `ReportFailure(addr)` da var; 11. günden beri
+yapılandırma değişikliği için `Reload` da.
+
+**Neden.** v1.6 §6.1 pasif sağlık kontrolü ister — gerçek trafikle beslenen ardışık hata sayacı — ve
+proxy'nin, yazıldığı haliyle arayüz üzerinden onu besleyecek bir yolu yoktu. İki yol artık aynı
+sayaçları hareket ettiriyor; gerçek trafikte başarısız olan bir backend bir sonraki probe'u
+beklemeden çıkarılır. Yük altında çöken bir backend'de bunun neye değdiğini §10.8 ölçtü.
+
+### B.4 Tamamen sağlıksız havuz yine de denenir
+
+*v1.6 §5.5, bu durumu kapsamaz · 10. gün · §6.2*
+
+**v1.6.** Bir backend başarısız olduğunda ne olacağı; ama sağlık kontrolü her backend'i aynı anda
+sağlıksız işaretlediğinde ne yapılacağı değil.
+
+**Bunun yerine.** Havuzda sağlıklı hiçbir şey yoksa istek yine de denenmemiş backend'lere sunulur ve
+bu geri dönüş `no_healthy_backend` olarak sayılır — Envoy'un panic mode dediği şey. Bu yüzden her
+backend sağlıksız ama hâlâ cevap veriyorsa istemci, yük dengeleyiciden 503 yerine backend'in kendi
+yanıtını alır.
+
+**Neden.** Doygunlukta sağlık probe'ları zaman aşımına uğrayan ilk istekler arasındadır. 10. günün
+yük testinde her backend aynı anda sağlıksız işaretlendi ve yük dengeleyici 275.769 isteği reddetti;
+yavaş bir sistem bozuk bir sisteme dönüştü. Hâlâ cevap verebilecek bir backend bir denemeye değer;
+ölü olan bir başarısız denemeye mal olur ve istemci zaten alacağı 503'ü alır.
+
+### B.5 Yapılandırma şemasına iki alan eklendi
+
+*v1.6 §3.3 · 8. ve 10. gün · §7, Ek A*
+
+**v1.6.** Gözlemlenebilirliğin nerede sunulacağı için bir ayar yok, profilleme için de yok.
+
+**Bunun yerine.** `metrics_addr` (varsayılan `:8081`) `/metrics` ve `/status`'u, v1.2.0'dan beri de
+`/healthz` ve `/readyz`'i sunar. `enable_pprof` (varsayılan `false`) bu porta Go'nun profilleme
+uçlarını ekler.
+
+**Neden.** Trafik portunda bu yollar hiçbir zaman bir backend'e iletilemezdi ve iç durum, yük
+dengeleyiciye ulaşabilen herkese açık olurdu. Gözlemlenebilirlik sunucusunun bağlantı sınırı yoktur;
+trafik portu doyduğu anda bile cevap vermeye devam eder. Profilleme heap ve goroutine durumunu açığa
+verdiği için varsayılan olarak kapalıdır.
+
+### B.6 Bir yanıt zaman aşımı eklendi
+
+*v1.6 §3.3 · 11. gün · §6.3, Ek A*
+
+**v1.6.** Bağlantı, okuma, yazma ve boşta zaman aşımları. Okuma ve yazma istemciyle konuşmayı,
+bağlantı bir backend'e ulaşmayı sınırlar; bağlandıktan sonra bir backend'in cevap vermeye
+başlamasının ne kadar sürebileceğini hiçbir şey sınırlamıyordu.
+
+**Bunun yerine.** `timeouts.response_timeout`; verilmezse okuma zaman aşımını alır.
+
+**Neden.** O olmadan, bağlantıyı kabul edip takılan bir backend isteği istemci tarafındaki yazma
+zaman aşımı öldürene kadar tutar ve hata stratejisi başka bir backend denemeye hiç fırsat bulamaz.
+Onunla takılan backend bırakılır ve istek başka yerde yeniden denenir — v1.6 §10.4'teki dayanıklılık
+senaryosu.
+
+### B.7 Grafana bir bellek bütçesine ihtiyaç duyar; yığın 5 sn'de bir scrape eder
+
+*v1.6 §7.6 · 8. ve 12. gün · §8.3*
+
+**v1.6.** İki izleme container'ı için de 256 MB bellek sınırı ve 15 saniyelik scrape aralığı.
+
+**Bunun yerine.** Prometheus 256 MB'ta kalır. Grafana'nın sınırı 1 GB ve, daha önemlisi, 768 MiB'lık
+bir `GOMEMLIMIT`'i var. Geliştirme yığını her 5 saniyede bir scrape eder ve yenilenir.
+
+**Neden.** Grafana 13 boşta 256 MB'a sığıyor ama bir dashboard çizildiği anda öldürülüyordu
+(`OOMKilled`); 512 MB bunu yalnızca erteledi. Sürekli yük altında belleği birinci dakikada
+587 MiB'tan dördüncüde 751 MiB'a tırmandı ve artmaya devam etti, çünkü Go çalışma zamanı bütçesini
+bilmediğinde geç toplar. Bütçe söylendiğinde aynı yük yaklaşık 774 MiB'ta sabitlendi ve beş dakika
+boyunca yeniden başlamadı; sınırın geri kalanı heap dışındaki ayırmalar için paydır. Beş saniyede bir
+scrape eden Prometheus 143 MiB kullanıyor. 5 saniyelik aralık, bir değişikliğin etkisini izlerken
+dashboard'ları işe yarar kılan şeydir; üretim önerisi v1.6'nın yazdığı gibi kalır.
+
+### B.8 Yük testi amaca özel bir üretici kullandı
+
+*v1.6 §10.3 · 10. gün, v1.3.0'dan sonra düzeltildi · §10.1, §10.8*
+
+**v1.6.** wrk ya da ab ile yük testi.
+
+**Bunun yerine.** `ab` referans ölçümleri üretti, ama tek iş parçacıklıdır ve bin bağlantıda
+`apr_socket_recv: Operation timed out` ile başarısız oldu. Bunun üstünde amaca özel bir sürücü
+kullanıldı — bağlantı başına bir goroutine, keep-alive, kaydedilen gecikmelerden yüzdelikler — önce
+doğrudan bir backend'e karşı saniyede 108.000 istekle sınandıktan sonra.
+
+**Neden.** v1.6'nın sorduğu eşzamanlılığı yalnızca onu tutabilen bir sürücü ölçebilirdi. İlk sürücü
+saklanmadı ve 10. günün sayıları doğrulanamaz kaldı; halefi `cmd/loadgen`, ölçüm yapılandırması ve
+betiklerle birlikte repodadır ve ikinci kampanya (§10.8) onunla yapıldı.
+
+### B.9 Bir demo konsolu eklendi
+
+*v1.6'nın kapsamı dışında · v1.0.0'dan sonra · §4.2*
+
+**v1.6.** Gösterimler için bir araç yok.
+
+**Bunun yerine.** `cmd/demo`: yığını ayağa kaldıran ve normalde elle yazılacak eylemleri sunan yerel
+bir konsol — sürekli trafik, dağılımı ölçmek, backend'leri durdurup başlatmak, algoritmayı
+değiştirmek, hız sınırını göstermek ve her şeyi geri almak.
+
+**Neden.** Bir gösterim, zaman baskısı altında uzun komutları doğru yazmaya bağlı olmamalı. Konsol
+ürünün parçası değil bir geliştirme aracıdır: `docker`'ı çağırır, yapılandırma dosyasına yazar,
+hiçbir sokette dinlemez, imajda yer almaz ve çalıştırdığı her komutu ekrana yazar; böylece olan
+biteni gizleyen bir katman değil, yazmanın kısayolu olarak kalır.
+
+### B.10 Gecikme hedefi yük cinsinden yeniden ifade edildi
+
+*v1.6 §10.3 · 10. gün · §10.3, §10.8*
+
+**v1.6.** Bin eşzamanlı bağlantıda tek haneli ile düşük onlu milisaniyeler arasında bir p95
+gecikme.
+
+**Bunun yerine.** Hedef yüz bağlantıda tutturuluyor (5,3 ms), binde kaçırılıyor (46,7 ms); yük
+üreticisini ve on backend'i de çalıştıran bir makinede. Tek bir sayı olarak değil, gerçekte beklenen
+yük cinsinden yeniden ifade edildi.
+
+**Neden.** Test koşulları, yük dengeleyicinin makineye tek başına sahip olduğu bir dağıtımın
+koşulları değil. İkinci kampanya bunu daha keskin gösterdi: yüksek eşzamanlılıkta istemcinin
+gecikmesinin çoğu, yük dengeleyicinin handler'ından önce bağlantı kuyruğunda geçiyordu; yük
+dengeleyicinin kendi p95'i ise bir mertebe düşük kaldı (§10.8).
+
+### B.11 Bir retry budget eklendi
+
+*v1.6'da yok; §5.5 yalnızca tek bir isteği sınırlar · v1.0.0'dan sonra · §6.5*
+
+**v1.6.** `retry_next_backend` bir isteğin retry'larını `max_retries` ile sınırlar, fazlasını
+değil.
+
+**Bunun yerine.** Uçuştaki retry'lar uçuştaki isteklerin `retry.budget_percent`'i ile sınırlanır
+(varsayılan 20), `retry.min_retry_concurrency` kadarına her zaman izin verilir (varsayılan 3);
+reddedilen bir retry 503 ile cevaplanır ve `retry_budget_exhausted` olarak sayılır. İki alan da
+isteğe bağlı ve varsayılanlıdır; mevcut bir yapılandırma geçerli kalır ve budget'ı kazanır.
+
+**Neden.** Havuz hata vermeye başladığında her istek aynı anda retry eder ve backend'lere ulaşan
+trafik, en az kaldırabilecekleri anda `1 + max_retries` katına kadar büyür. Tasarım Envoy'un retry
+budget'ını izler. Dört hatalı backend ve elli eşzamanlı istekle backend'lere budget olmadan 200,
+varsayılan budget'la 62 kez ulaşıldı.
+
+### B.12 Least connections rastgele iki backend'i karşılaştırır
+
+*v1.6 §5.2 · v1.0.0'dan sonra · §5.4, §10.7*
+
+**v1.6.** Least connections en az aktif bağlantısı olan backend'i seçer; ilk gerçekleştirim bunu
+havuzu tarayarak yapıyordu.
+
+**Bunun yerine.** Rastgele iki farklı backend çekilir ve daha az meşgul olanı isteğe hizmet eder —
+power of two choices, Envoy'un least request dengeleyicisindeki gibi. Yapılandırma adı
+`least_connections` olarak kalır.
+
+**Neden.** Tarama eşitlikleri havuz sırasına göre bozuyordu ve backend'ler istekler gelmeden cevap
+verdiğinde eşitlik olağan durumdur: on backend üzerindeki 100 ardışık isteğin hepsi ilkine gitti,
+birlikte gelen istekler de aynı backend'e yığıldı. İki rastgele örnek ikisini de kaldırır, havuz
+boyutu ne olursa olsun 14 ns tutar (tarama bin backend'de 484 ns'ye çıkıyordu) ve sürekli yük
+altında yavaş bir backend'den kaçınmayı korur — 200 isteğin 6 ile 11'i, taramada 7.
+
+### B.13 Mock backend'ler projeye ait bir programdır
+
+*v1.6 §8 · v1.1.0'dan sonra · §9.4*
+
+**v1.6.** Her isteğe anında sabit bir metinle cevap veren on `hashicorp/http-echo` container'ı.
+
+**Bunun yerine.** On backend'in hepsi olarak farklı profillerle çalışan tek bir program,
+`cmd/mockbackend`: medyanı ve 99. yüzdeliğiyle belirlenen log-normal bir gecikme, ötesinde 503
+döndüğü sınırlı kuyruklu bir kapasite, bir yanıt boyutu ve bir hata oranı. Altı backend hızlı, ikisi
+daha yavaş ve daha az kapasiteli, biri zorlanan ve biri 256 KiB döndüren. Her biri adını hâlâ
+söylüyor, artık bir `X-Backend` başlığında da.
+
+**Neden.** Üç sonuç `http-echo`'nun on baytı mikrosaniyede döndürmesine bağlıydı: uçuşta hiçbir
+zaman istek olmadığı için least connections gösterilemiyordu; yük testi iletimi on baytlık gövdeyle
+ölçüyordu; her backend eşit olduğu için de ağırlıklar ve kapasite farkları hiç sınanmıyordu. Sağlık
+kontrolü de yalnızca bir erişilebilirlik kontrolüydü; mock ise kuyruğu yarıdan fazla doluyken
+kendini sağlıksız bildiriyor.
+
+### B.14 Yük dengeleyici canlılık ve hazır olma sorgularına cevap verir
+
+*v1.6 §7.6 · v1.1.0'dan sonra · §8.2*
+
+**v1.6.** Metrikler ve loglar üzerinden izleme. 12. günün imajında container sağlık kontrolü yoktu,
+çünkü distroless bir imajda onu çalıştıracak kabuk ya da `curl` yok.
+
+**Bunun yerine.** Metrik portu, süreç cevap verdiği sürece 200 dönen `/healthz`'i ve en az bir
+backend sağlıklıyken 200, hiçbiri değilse ya da kapanma başladıysa 503 dönen `/readyz`'i sunar;
+kapanırken metrik portu, trafik portu boşalana kadar açık kalır. `lb -probe <url>` 200'de 0, aksi
+halde 1 ile çıkar ve Compose onu `/healthz`'e karşı çalıştırır.
+
+**Neden.** Bir container çalışma ortamı ya da orkestratör, ne `/metrics`'in ne de `/status`'un
+cevapladığı evet-hayır bir soru sorar. Canlılık ile hazır olma ayrı tutulur, çünkü bütün
+backend'leri düşmüş bir yük dengeleyici hâlâ çalışmaktadır ve onu yeniden başlatmak hiçbirini geri
+getirmez. Probe bayrağı, imaja hiçbir şey eklemeden ona bir sağlık kontrolü kazandırır.
+
+### B.15 Idempotent olmayan bir istek, yalnızca bir backend onu almadan önce retry edilir
+
+*v1.6 §5.5 · v1.2.0'dan sonra · §6.3*
+
+**v1.6.** `retry_next_backend`, istek ne olursa olsun başarısız bir denemeyi başka bir backend'de
+yeniden dener.
+
+**Bunun yerine.** Idempotent istekler (GET, HEAD, PUT, DELETE, OPTIONS, TRACE) her hatadan sonra
+retry edilir. Diğerleri — POST, PATCH ya da yük dengeleyicinin tanımadığı bir metot — yalnızca
+bağlantı hiç kurulamadığında retry edilir; hiçbir backend'in isteği görmediğini kanıtlayan tek hata
+budur. Sonraki her hata isteği `not_retryable` olarak sayılan bir 503 ile bitirir.
+
+**Neden.** Bir backend isteği yerine getirip yanıtı ulaşmadan hata verebilir ya da `retry_on_5xx`
+altında 5xx dönebilir; yük dengeleyici ikisini de hiç ulaşmamış bir istekten ayırt edemez ve bir
+POST'u yeniden denemek ikinci bir sipariş oluşturabilir. RFC 9110 aynı çizgiyi çeker; nginx ve Envoy
+da böyle davranır. Kural yapılandırmada değil koddadır; proje güvensiz davranış için bir anahtar
+sunmayı tutarlı biçimde reddetti.
+
+### B.16 Her istek bir kimlik taşır
+
+*v1.6 §7.6 · v1.2.0'dan sonra · §8.2*
+
+**v1.6.** Metrikler ve yapılandırılmış loglar üzerinden gözlemlenebilirlik; yük dengeleyicinin
+logundaki bir satırı bir backend'in logundaki aynı isteğe bağlayan hiçbir şey yok.
+
+**Bunun yerine.** Her istek bir kimlik alır: istemcinin `X-Request-Id`'si en fazla 64 karakterlik
+yazdırılabilir ASCII ise o, değilse `crypto/rand` ile üretilen bir değer. İstemciye döner, aynı
+başlıkla backend'e iletilir ve istekle ilgili her log satırına `request_id` olarak yazılır.
+
+**Neden.** On backend ve retry'larla başarısız bir istek birkaç logda görünür ve ortak bir anahtar
+olmadan bunlar hizalanamaz. İstemcinin kendi kimliği, daha önce başlamış bir iz yük dengeleyicide
+kopmasın diye korunur; her backend'in loguna ulaştığı için de sınırlanır ve denetlenir. Hız sınırlama
+ve doğrulamadan önce atanır, böylece yük dengeleyicinin kendisinin reddettiği bir istek de
+izlenebilir.
+
+### Yapılmayan: epoll deneyi
+
+*v1.6 §4.2 · §4.3*
+
+v1.6'nın 10. ve 11. günlerin yanına planladığı isteğe bağlı öğrenme egzersizi yapılmadı; nedenleri
+§4.3'tedir.
 
 ---
 
@@ -1087,5 +1334,5 @@ Her maddenin gerekçesi [`docs/design-deviations.md`](../design-deviations.md) d
 | Sürüm | Tarih | Değişiklik |
 | --- | --- | --- |
 | 1.1 (v1.6) | 31 Ağustos 2026 | Gerçekleştirimden önce yazılan tasarım ve on iki günlük plan. Türkçe. [technical-design-v1.6-tr.md](technical-design-v1.6-tr.md) |
-| 1.7 | 10 Eylül 2026 | v1.0.0 sonrası revizyon notları: v1.6'yı inşa edilen sisteme uyduran bölüm bölüm düzenlemeler. [Türkçe](revision-notes-v1.7-tr.md), [İngilizce](revision-notes-v1.7-en.md) |
+| 1.7 | 10 Eylül 2026 | v1.0.0 sonrası revizyon notları: v1.6'yı inşa edilen sisteme uyduran bölüm bölüm düzenlemeler. Yerini 1.8 aldı ve Eylül 2026'da repodan kaldırıldı; repo geçmişinde duruyor |
 | 1.8 | 11 Eylül 2026 | İngilizce ve Türkçe tek bir tasarım makalesi olarak yeniden yazıldı: inşa edilen sistem, değerlendirme, sürüm sonrası benchmark'lar ve retry budget, ve v1.1.0 için gerçekleştirilip değerlendirilen power of two choices |
