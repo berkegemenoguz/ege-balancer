@@ -123,8 +123,9 @@ to 7.7 ms.
 
 ## What this says about the configuration
 
-See [design deviations](design-deviations.md) for the two entries this report produced: the
-fallback when health checking empties the pool, and the restated latency target.
+Appendix B of the [technical design](technical-design/technical-design-v1.8-en.md#appendix-b--deviations-from-the-original-design) records the two entries this report
+produced: the fallback when health checking empties the pool (entry 4), and the restated latency
+target (entry 10).
 
 Section 10.3 of the design document proposes p95 latency at a thousand concurrent connections in
 the single digit to low tens of milliseconds. The measurement is 46.7 ms — above that, on a
