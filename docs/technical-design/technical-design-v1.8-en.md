@@ -7,7 +7,7 @@
 | Author | Berk Egemen Oğuz |
 | Date | 11 September 2026 |
 | Version | 1.8 — supersedes v1.6 and the v1.7 revision notes |
-| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), and the second measurement campaign against the profiled backends (§10.8), up to v1.3.0 |
+| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), the second measurement campaign against the profiled backends (§10.8), and the three defects the realistic mock backends exposed, fixed in v1.3.1 (§11.1) |
 | Code | `github.com/berkegemenoguz/ege-balancer` |
 | Language | English. A Turkish edition with the same content is [technical-design-v1.8-tr.md](technical-design-v1.8-tr.md) |
 
@@ -415,6 +415,13 @@ counted as `not_retryable`, because the backend may have carried the request out
 a connection that then broke, and a second attempt would place a second order (Appendix B, entry
 15).
 
+A failure after the answer has started is different. Once the backend's status line and headers
+have been passed on, the forwarder cannot turn a broken-off answer into an error for the retry loop;
+it aborts the client's connection instead, and nothing can be retried at that point, whatever the
+method. The attempt still counts against the backend — with the health checker, the circuit breaker
+and `lb_backend_failures_total` — unless the client itself went away, which is not the backend's
+failure. Before v1.3.1 such an attempt was not counted at all (§11.1).
+
 ### 6.4 Circuit breaker
 
 ```mermaid
@@ -458,6 +465,11 @@ belongs to the configuration snapshot: a reload builds a new, empty one, and req
 the budget they started with, so no counter is ever decremented on the wrong instance. The budget is
 on by default; a configuration that does not mention it gets the defaults, and light traffic retries
 exactly as before.
+
+
+A retry gives its share of the budget back however it ends, including when the forwarder aborts an
+answer part way through. Before v1.3.1 such a retry kept its share, and enough of them refused every
+retry until the next reload (§11.1).
 
 ### 6.6 What the client sees
 
@@ -629,11 +641,36 @@ equal. They are now one program, `cmd/mockbackend`, run with a profile per backe
 | `capacity`, `queue` | requests served at once, and requests that may wait; beyond the queue the backend answers 503 |
 | `body-size` | size of the answer, with the backend's name on its first line |
 | `error-rate` | share of requests answered with 500 |
+| `cache-size`, `miss-penalty` | client sessions remembered, keyed by `X-Session`, and the extra time a request takes when its session is not |
+| `hang-rate`, `reset-rate`, `drip-rate`, `drip-over` | shares of requests held without an answer, dropped half way through the answer, or dripped out over `drip-over` |
+| `cold-start`, `cold-factor` | how long after starting the backend is slower, and how much slower at first |
+| `pause-every`, `pause` | a stop of the whole process at the end of every period, health check included |
+| `admin` | a second port through which faults are started and cleared while the backend runs |
 | `seed` | makes the sequence of latencies and failures repeatable |
 
 Latency is spent only while a request holds a worker, so a backend with little capacity slows down
 under load as its queue grows, the way a real server does; its `/healthz` answers 503 while the
 queue is more than half full. Every backend also names itself in an `X-Backend` header.
+
+The later settings make a backend behave more like a real service, and all of them are off in the
+default environment. A cache is what makes sending a client back to the same backend worth
+something: a request whose session the backend remembers skips the miss penalty, and the answer
+says `X-Cache: hit` or `miss`. Without it, session affinity — which §12 lists as absent — could show
+only its cost.
+The failure modes are the ones a balancer meets in practice and a 500 does not cover: a request that
+is never answered and holds its worker, a connection that closes half way through the answer, an
+answer that arrives whole but late. A cold start and pauses make time part of the profile; pauses
+come at a phase drawn from the seed, so backends started together do not stop together, which the
+collections of separate processes would not. `deploy/docker-compose.realistic.yml` turns all of it on
+at low rates.
+
+The admin port starts and clears a fault on one backend while it runs, for a limited time; an
+injected fault replaces the profile's rate for its mode rather than adding to it, and ends on its
+own after at most ten minutes. It is a separate server for two reasons. The balancer forwards every
+path on the traffic port, so an endpoint there could be reached by any client of the balancer; the
+admin port is published on the loopback interface only. And nothing on it waits on the fault layer,
+so it answers while the backend is hanging or frozen, exactly when someone wants to stop it. The
+demo console's fault action uses it.
 
 | Backends | Profile | Latency (median, p99) | Capacity, queue | Answer |
 | --- | --- | --- | --- | --- |
@@ -895,6 +932,30 @@ it finds only the interleavings that happen: a slower, busier CI runner produced
 fast development machine did not. Running the whole suite under `-race` on every push is what found
 them.
 
+
+Three more defects were found after v1.3.0, and the realistic mock backends of §9.4 are what found
+them. All three show only when something fails in the middle of an exchange, which the earlier
+backends never did:
+
+- **The retry budget leaked.** Go's reverse proxy aborts an answer that fails part way through by
+  panicking rather than returning, and the retry loop gave a retry's share of the budget back after
+  the call returned. Every retry that ended in an aborted answer kept its share for good; once they
+  filled the budget — twenty, with a hundred requests in flight — every retry was refused until the
+  next reload. The release is now deferred.
+- **Answers broken off part way were not counted.** The same abort skipped the bookkeeping, so a
+  backend that kept cutting its answers short never reached the health checker, the circuit breaker
+  or the failure metric, and was never taken out of the pool. The backend's answer is now read
+  through a wrapper that marks the attempt when a read fails, and the failure is recorded as the
+  abort passes through, unless the client itself hung up.
+- **The shipped configurations defeated the response timeout.** `response_timeout` and
+  `write_timeout` were both ten seconds, so by the time a stalled backend was abandoned the client's
+  write deadline had passed, and even a successful retry could not be written back. The
+  configurations now use three seconds, and the balancer warns about any configuration in which the
+  response timeout is not the shorter of the two.
+
+Each fix has a test that fails with the fix reverted. The first two had been in the code since
+v1.1.0 and v1.0.0; no backend before the realistic ones could have shown them.
+
 ### 11.2 Where the design was wrong, and why that was useful
 
 Most deviations (Appendix B) are refinements; three changed behaviour in ways the design did not
@@ -1024,7 +1085,7 @@ health_check:
 
 timeouts:                           # restart to change
   connect_timeout: 2s
-  response_timeout: 10s             # omitted means read_timeout
+  response_timeout: 3s              # omitted means read_timeout; keep it under write_timeout
   read_timeout: 10s
   write_timeout: 10s
   idle_timeout: 60s
@@ -1042,6 +1103,10 @@ logging:
 Defaults are applied for `metrics_addr`, `response_timeout`, `budget_percent`,
 `min_retry_concurrency`, backend weights and logging. Unknown fields are errors. Everything not
 marked "restart to change" is applied by `SIGHUP`.
+
+A `response_timeout` that is not shorter than `write_timeout` is accepted but logged as a warning, at
+start and on every reload: once a stalled backend is abandoned, what is left of the write timeout is
+the time there is to answer the client from another backend.
 
 ---
 
@@ -1251,13 +1316,17 @@ avoided under sustained load — 6 to 11 of 200 requests, against 7 for the scan
 log-normal latency set by its median and 99th percentile, a capacity with a bounded queue beyond
 which it answers 503, an answer size and an error rate. Six backends are fast, two slower with less
 capacity, one struggling, and one answers 256 KiB. Each still names itself, now also in an
-`X-Backend` header.
+`X-Backend` header. After v1.3.0 the program also remembers client sessions, fails in the ways a
+500 does not cover, starts cold and pauses, and takes faults at runtime through an admin port the
+balancer never forwards to.
 
 **Why.** Three results depended on `http-echo` answering ten bytes in microseconds: least
 connections could not be shown, because nothing was ever in flight; the load test measured
 forwarding with a ten-byte body; and every backend was equal, so weights and capacity differences
 were never exercised. Its health check was also only a reachability check, where the mock reports
-itself unhealthy while its queue is more than half full.
+itself unhealthy while its queue is more than half full. The later additions came with the plan to
+add consistent hashing and sticky sessions: against backends that remember nothing, affinity can
+show only its cost.
 
 ### B.14 The balancer answers liveness and readiness probes
 
