@@ -1047,27 +1047,276 @@ marked "restart to change" is applied by `SIGHUP`.
 
 ## Appendix B — Deviations from the original design
 
-The reasoning for each entry is in [`docs/design-deviations.md`](../design-deviations.md).
+This appendix records every place where the system departs from the original design (v1.6). Each
+entry says what v1.6 said, what was done instead and why; the line under its title gives the v1.6
+section it touches, when the decision was taken, and where the body of this document describes the
+result. The development log has the surrounding detail for each day.
 
-| # | Deviation | v1.6 section | Where in this document |
-| --- | --- | --- | --- |
-| 1 | Commits go straight to `main`; CI is the gate instead of pull requests | 7.1, 7.3, 11 | §9.2 |
-| 2 | Weighted round robin is deterministic (smooth), not probabilistic | 5.3 | §5.2 |
-| 3 | The health checker interface carries the passive path and reload | 6.2 | §4.2 |
-| 4 | An all-unhealthy pool is still tried (panic mode) | 5.5 | §6.2 |
-| 5 | `metrics_addr` and `enable_pprof` added to the schema | 3.3 | §7, Appendix A |
-| 6 | `response_timeout` added to the timeouts | 3.3 | §6.3, Appendix A |
-| 7 | Grafana needs a memory budget; the stack scrapes every 5 s | 7.6 | §8.3 |
-| 8 | Load testing used a purpose-built driver above `ab`'s limit | 10.3 | §10.1 |
-| 9 | A demo console was added for demonstrations | — | §4.2 |
-| 10 | The latency target is restated in terms of load | 10.3 | §10.3 |
-| 11 | A retry budget was added to the failure policies | 5.5 | §6.5 |
-| 12 | Least connections compares two random backends instead of scanning | 5.2 | §5.4, §10.7 |
-| 13 | The mock backends are a program of the project with profiles, not `http-echo` | 8 | §9.4 |
-| 14 | The balancer answers liveness and readiness probes, and its image checks itself | 7.6 | §8.2 |
-| 15 | A request that is not idempotent is retried only before a backend has it | 5.5 | §6.3 |
-| 16 | Every request carries an identifier, in the logs and in `X-Request-Id` | 7.6 | §8.2 |
-| — | The epoll learning exercise was not carried out | 4.2 | §4.3 |
+### B.1 Commits go straight to main
+
+*v1.6 §7.1, §7.3 and the version control criterion in §11 · day 2 · §9.2*
+
+**v1.6.** A protected `main`, `feature/<module>` branches, and every change merged through a pull
+request that CI has passed.
+
+**Instead.** Work is committed straight to `main`, and CI runs on every push rather than on pull
+requests. The quality gate is unchanged: nothing reaches `main` without gofmt, `go vet`,
+golangci-lint, govulncheck, the build and the full test suite passing.
+
+**Why.** The branching ceremony buys nothing with one developer and no reviewer. If the team grows,
+branch protection and the pull request flow should be turned back on; the pipeline already runs
+every check a pull request would need.
+
+### B.2 Weighted round robin is deterministic
+
+*v1.6 §5.3 and the day 5 row of the plan · day 5 · §5.2*
+
+**v1.6.** Weighted selection that is proportional and probabilistic.
+
+**Instead.** Smooth weighted round robin. Each selection raises every backend's credit by its
+weight, the backend with the most credit serves the request, and its credit then drops by the total
+weight.
+
+**Why.** It hits the configured ratio exactly rather than approximately, needs no random source, and
+spreads a heavy backend's turns across the cycle instead of bunching them: weights 5, 1, 1 give
+`a a b a c a a`. The tests become exact instead of statistical — 1,200 requests over weights 1, 2
+and 3 produce exactly 200, 400 and 600.
+
+### B.3 The health checker interface carries the passive path
+
+*v1.6 §6.2 · day 6, with reload added on day 11 · §4.2*
+
+**v1.6.** An example interface of `Start(ctx, backends)` and `IsHealthy(addr)`.
+
+**Instead.** The interface also has `ReportSuccess(addr)` and `ReportFailure(addr)`, and since
+day 11 `Reload` for a configuration change.
+
+**Why.** v1.6 §6.1 requires passive health checking — a consecutive failure counter fed by real
+traffic — and the proxy had no way to feed it through the interface as written. Both paths now move
+the same counters, so a backend that fails real traffic is removed without waiting for the next
+probe; §10.8 measured what that is worth when a backend crashes under load.
+
+### B.4 An all-unhealthy pool is still tried
+
+*v1.6 §5.5, which does not cover the case · day 10 · §6.2*
+
+**v1.6.** What happens when a backend fails, but not what to do when health checking marks every
+backend unhealthy at once.
+
+**Instead.** When nothing in the pool is healthy, the untried backends are offered the request
+anyway, and the fallback is counted as `no_healthy_backend` — what Envoy calls panic mode. When
+every backend is unhealthy but still answering, the client therefore receives the backend's own
+response rather than a 503 from the balancer.
+
+**Why.** Under saturation the health probes are among the first requests to time out. In the day 10
+load test every backend was marked unhealthy at once and the balancer refused 275,769 requests,
+turning a slow system into a broken one. A backend that may still answer is worth one attempt; a
+dead one costs one failed attempt, and the client sees the 503 it would have received anyway.
+
+### B.5 Two fields added to the configuration schema
+
+*v1.6 §3.3 · days 8 and 10 · §7, Appendix A*
+
+**v1.6.** No setting for where observability is served, and none for profiling.
+
+**Instead.** `metrics_addr` (default `:8081`) serves `/metrics` and `/status`, and since v1.2.0
+`/healthz` and `/readyz`. `enable_pprof` (default `false`) adds Go's profiling endpoints to that
+port.
+
+**Why.** On the traffic port these paths could never be proxied to a backend, and internal state
+would be open to anyone who can reach the balancer. The observability server has no connection
+limit, so it keeps answering exactly when the traffic port is saturated. Profiling is off by
+default because it hands out heap and goroutine state.
+
+### B.6 A response timeout was added
+
+*v1.6 §3.3 · day 11 · §6.3, Appendix A*
+
+**v1.6.** Connect, read, write and idle timeouts. Read and write bound the conversation with the
+client and connect bounds reaching a backend; nothing bounded how long a backend may take to start
+answering once connected.
+
+**Instead.** `timeouts.response_timeout`, defaulting to the read timeout when omitted.
+
+**Why.** Without it, a backend that accepts the connection and then stalls holds the request until
+the client-side write timeout kills it, and the failure policy never gets to try another backend.
+With it, a stalled backend is abandoned and the request retried elsewhere — the resilience scenario
+of v1.6 §10.4.
+
+### B.7 Grafana needs a memory budget; the stack scrapes every 5 s
+
+*v1.6 §7.6 · days 8 and 12 · §8.3*
+
+**v1.6.** A 256 MB memory limit for both monitoring containers, and a 15 s scrape interval.
+
+**Instead.** Prometheus keeps 256 MB. Grafana has a 1 GB limit and, more importantly, a
+`GOMEMLIMIT` of 768 MiB. The development stack scrapes and refreshes every 5 s.
+
+**Why.** Grafana 13 idles inside 256 MB but was killed (`OOMKilled`) the moment a dashboard
+rendered, and 512 MB only postponed it: under continuous load its memory climbed from 587 MiB at one
+minute to 751 MiB at four and kept rising, because the Go runtime collects late when it does not know
+its budget. Told the budget, the same load plateaued at about 774 MiB with no restart over five
+minutes; the rest of the limit is headroom for allocations outside the heap. Prometheus, scraping
+every five seconds, uses 143 MiB. A 5 s interval is what makes the dashboards useful while watching
+a change take effect; the production guidance stays as v1.6 wrote it.
+
+### B.8 Load testing used a purpose-built generator
+
+*v1.6 §10.3 · day 10, corrected after v1.3.0 · §10.1, §10.8*
+
+**v1.6.** Load testing with wrk or ab.
+
+**Instead.** `ab` produced the reference measurements, but it is single-threaded and failed at a
+thousand connections with `apr_socket_recv: Operation timed out`. Above that, a purpose-built driver
+was used — one goroutine per connection, keep-alive, percentiles from recorded latencies — after
+being checked against a backend directly at 108,000 requests per second.
+
+**Why.** Only a driver that could hold the concurrency v1.6 asks about could measure it. The first
+driver was not kept, which left the day 10 figures unverifiable; its successor, `cmd/loadgen`, is
+part of the repository together with the measurement configuration and scripts, and the second
+campaign (§10.8) was run with it.
+
+### B.9 A demo console was added
+
+*outside v1.6's scope · after v1.0.0 · §4.2*
+
+**v1.6.** No tool for demonstrations.
+
+**Instead.** `cmd/demo`, a local console that brings the stack up and offers the actions one would
+otherwise type: sustained traffic, measuring the distribution, stopping and starting backends,
+switching the algorithm, demonstrating the rate limit, and putting everything back.
+
+**Why.** A demonstration should not depend on typing long commands correctly under time pressure.
+The console is a development tool, not part of the product: it shells out to `docker`, writes the
+configuration file, never listens on a socket, is excluded from the image, and prints every command
+it runs, so it stays a shortcut for typing rather than a layer that hides what happens.
+
+### B.10 The latency target is restated in terms of load
+
+*v1.6 §10.3 · day 10 · §10.3, §10.8*
+
+**v1.6.** p95 latency at a thousand concurrent connections in the single digits to low tens of
+milliseconds.
+
+**Instead.** The target is met at a hundred connections (5.3 ms) and missed at a thousand (46.7 ms),
+on a machine that was also running the load generator and all ten backends. It is restated in terms
+of the load actually expected rather than as one number.
+
+**Why.** The test conditions are not those of a deployment in which the balancer has the machine to
+itself. The second campaign made the point sharper: at high concurrency most of the client's latency
+was spent in the connection backlog, before the balancer's handler, while the balancer's own p95
+stayed an order of magnitude lower (§10.8).
+
+### B.11 A retry budget was added
+
+*not in v1.6, whose §5.5 bounds only a single request · after v1.0.0 · §6.5*
+
+**v1.6.** `retry_next_backend` bounds the retries of one request with `max_retries`, and nothing
+more.
+
+**Instead.** Retries in flight are capped at `retry.budget_percent` of the requests in flight
+(default 20), with `retry.min_retry_concurrency` always allowed (default 3); a refused retry is
+answered with 503 and counted as `retry_budget_exhausted`. Both fields are optional and defaulted,
+so an existing configuration stays valid and gains the budget.
+
+**Why.** When the pool starts failing, every request retries at once and the traffic reaching the
+backends grows by up to `1 + max_retries` times, at the moment they can least absorb it. The design
+follows Envoy's retry budget. With four failing backends and fifty concurrent requests, the backends
+were reached 200 times without the budget and 62 times with the default one.
+
+### B.12 Least connections compares two random backends
+
+*v1.6 §5.2 · after v1.0.0 · §5.4, §10.7*
+
+**v1.6.** Least connections chooses the backend with the fewest active connections, which the first
+implementation did by scanning the pool.
+
+**Instead.** Two different backends are drawn at random and the less busy one serves the request —
+the power of two choices, as in Envoy's least request balancer. The configuration name stays
+`least_connections`.
+
+**Why.** The scan broke ties by pool order, and ties are the common case when backends answer faster
+than requests arrive: 100 sequential requests over ten backends all went to the first one, and
+requests arriving together piled onto the same backend. Two random samples remove both, cost 14 ns
+at any pool size where the scan grew to 484 ns at a thousand backends, and still keep a slow backend
+avoided under sustained load — 6 to 11 of 200 requests, against 7 for the scan.
+
+### B.13 The mock backends are a program of the project
+
+*v1.6 §8 · after v1.1.0 · §9.4*
+
+**v1.6.** Ten `hashicorp/http-echo` containers, answering every request at once with a fixed text.
+
+**Instead.** `cmd/mockbackend`, one program run as all ten backends with different profiles: a
+log-normal latency set by its median and 99th percentile, a capacity with a bounded queue beyond
+which it answers 503, an answer size and an error rate. Six backends are fast, two slower with less
+capacity, one struggling, and one answers 256 KiB. Each still names itself, now also in an
+`X-Backend` header.
+
+**Why.** Three results depended on `http-echo` answering ten bytes in microseconds: least
+connections could not be shown, because nothing was ever in flight; the load test measured
+forwarding with a ten-byte body; and every backend was equal, so weights and capacity differences
+were never exercised. Its health check was also only a reachability check, where the mock reports
+itself unhealthy while its queue is more than half full.
+
+### B.14 The balancer answers liveness and readiness probes
+
+*v1.6 §7.6 · after v1.1.0 · §8.2*
+
+**v1.6.** Monitoring through metrics and logs. The day 12 image had no container health check,
+because a distroless image has no shell or `curl` to run one with.
+
+**Instead.** The metrics port serves `/healthz`, 200 for as long as the process answers, and
+`/readyz`, 200 while at least one backend is healthy and 503 when none is or once a shutdown has
+begun; on shutdown the metrics port stays up until the traffic port has drained. `lb -probe <url>`
+exits 0 on a 200 and 1 otherwise, and Compose runs it against `/healthz`.
+
+**Why.** A container runtime or an orchestrator asks a yes-or-no question that neither `/metrics`
+nor `/status` answers. Liveness and readiness are kept apart because a balancer whose backends are
+all down is still working, and restarting it would bring none of them back. The probe flag gives the
+image a health check without adding anything to it.
+
+### B.15 A request that is not idempotent is retried only before a backend has it
+
+*v1.6 §5.5 · after v1.2.0 · §6.3*
+
+**v1.6.** `retry_next_backend` retries a failed attempt on another backend whatever the request was.
+
+**Instead.** Idempotent requests (GET, HEAD, PUT, DELETE, OPTIONS, TRACE) are retried after any
+failure. Any other — POST, PATCH, or a method the balancer does not know — is retried only when the
+connection was never made, the one failure that proves no backend saw it; any later failure ends the
+request with 503, counted as `not_retryable`.
+
+**Why.** A backend can carry a request out and then fail before its answer arrives, or answer 5xx
+under `retry_on_5xx`, and the balancer cannot tell either from a request that never arrived:
+retrying a POST can place a second order. RFC 9110 draws the same line, and nginx and Envoy behave
+this way. The rule is in the code, not the configuration; the project has consistently declined to
+offer a switch for the unsafe behaviour.
+
+### B.16 Every request carries an identifier
+
+*v1.6 §7.6 · after v1.2.0 · §8.2*
+
+**v1.6.** Observability through metrics and structured logs, with nothing tying a line in the
+balancer's log to the same request in a backend's log.
+
+**Instead.** Every request gets an identifier: the client's `X-Request-Id` when it is printable
+ASCII of at most 64 characters, one generated from `crypto/rand` otherwise. It is returned to the
+client, sent on to the backend in the same header, and logged as `request_id` on every line about
+the request.
+
+**Why.** With ten backends and retries, a failed request appears in several logs, and without a
+shared key they cannot be lined up. A client's own identifier is kept so that a trace which started
+earlier survives the balancer; it is bounded and checked because it reaches the logs of every
+backend. It is assigned before rate limiting and validation, so a request the balancer refuses
+itself can be traced too.
+
+### Not carried out: the epoll exercise
+
+*v1.6 §4.2 · §4.3*
+
+The optional learning exercise that v1.6 planned beside days 10 and 11 was not carried out; §4.3
+gives the reasons.
 
 ---
 
@@ -1076,5 +1325,5 @@ The reasoning for each entry is in [`docs/design-deviations.md`](../design-devia
 | Version | Date | Change |
 | --- | --- | --- |
 | 1.1 (v1.6) | 31 August 2026 | The design and twelve-day plan, written before implementation. Turkish. [technical-design-v1.6-tr.md](technical-design-v1.6-tr.md) |
-| 1.7 | 10 September 2026 | Revision notes after v1.0.0: section-by-section edits to bring v1.6 in line with the built system. [Turkish](revision-notes-v1.7-tr.md), [English](revision-notes-v1.7-en.md) |
+| 1.7 | 10 September 2026 | Revision notes after v1.0.0: section-by-section edits to bring v1.6 in line with the built system. Superseded by 1.8, and removed from the repository in September 2026; they remain in its history |
 | 1.8 | 11 September 2026 | Rewritten as a single design paper in English and Turkish: the system as built, the evaluation, the post-release benchmarks and retry budget, and the power of two choices, implemented and evaluated for v1.1.0 |
