@@ -142,8 +142,10 @@ func testConfig(backends []*backend, weights ...int) *config.Config {
 			UnhealthyThreshold: 2,
 		},
 		Timeouts: config.Timeouts{
-			ConnectTimeout:  config.Duration(time.Second),
-			ResponseTimeout: config.Duration(2 * time.Second),
+			ConnectTimeout: config.Duration(time.Second),
+			// Shorter than the write timeout, so that a stalled backend is
+			// abandoned while there is still time to answer from another.
+			ResponseTimeout: config.Duration(time.Second),
 			// Kept short on purpose: a client opening more connections than it
 			// uses leaves some that never send a request, and shutdown waits
 			// for those until their read timeout expires.
