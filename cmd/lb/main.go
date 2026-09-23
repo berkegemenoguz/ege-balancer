@@ -52,6 +52,9 @@ func run(configPath string) error {
 	}
 	observability.NewLogger(cfg.Logging)
 	slog.Info("starting", "version", version)
+	for _, warning := range cfg.Warnings() {
+		slog.Warn("configuration", "warning", warning)
+	}
 
 	balancer, err := app.New(cfg, configPath)
 	if err != nil {

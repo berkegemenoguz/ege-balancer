@@ -93,6 +93,9 @@ func (a *App) Reload(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	for _, warning := range next.Warnings() {
+		slog.Warn("configuration", "warning", warning)
+	}
 	if fixed := a.cfg.RequiresRestart(next); len(fixed) > 0 {
 		slog.Warn("some settings need a restart and were not applied", "settings", fixed)
 	}
