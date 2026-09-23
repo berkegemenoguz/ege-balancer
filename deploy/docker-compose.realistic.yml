@@ -1,0 +1,37 @@
+# Overlay that makes the ten mock backends behave more like real services, on
+# top of their profiles in docker-compose.yml:
+#
+#   - each remembers 5,000 client sessions, named in X-Session, and a request
+#     whose session it does not remember costs 40 ms more;
+#   - a small share of requests fail the way real services do: 0.2% hang
+#     without an answer, 0.2% have their connection dropped half way through
+#     the answer, 0.5% are dripped out over two seconds;
+#   - for 30 seconds after starting they are up to four times slower;
+#   - every 15 seconds each pauses for 150 ms, at its own moment, as a garbage
+#     collector does.
+#
+#   docker compose -f deploy/docker-compose.yml \
+#                  -f deploy/docker-compose.realistic.yml up -d
+x-realistic: &realistic
+  MOCK_CACHE_SIZE: "5000"
+  MOCK_MISS_PENALTY: 40ms
+  MOCK_HANG_RATE: "0.002"
+  MOCK_RESET_RATE: "0.002"
+  MOCK_DRIP_RATE: "0.005"
+  MOCK_DRIP_OVER: 2s
+  MOCK_COLD_START: 30s
+  MOCK_COLD_FACTOR: "4"
+  MOCK_PAUSE_EVERY: 15s
+  MOCK_PAUSE: 150ms
+
+services:
+  backend-1: { environment: *realistic }
+  backend-2: { environment: *realistic }
+  backend-3: { environment: *realistic }
+  backend-4: { environment: *realistic }
+  backend-5: { environment: *realistic }
+  backend-6: { environment: *realistic }
+  backend-7: { environment: *realistic }
+  backend-8: { environment: *realistic }
+  backend-9: { environment: *realistic }
+  backend-10: { environment: *realistic }
