@@ -10,13 +10,13 @@ first section follows the production readiness criteria in section 11 of the des
 | Three algorithms selectable from configuration, verified by integration tests | met | `internal/integration/balancing_test.go` — round robin exactly even over ten backends, weights 1:2:3 exact over 120 requests, least connections moves load off a slow backend |
 | Health checking active; an unhealthy backend is removed and added back | met | `internal/integration/resilience_test.go`, and the live run in [day 6](development-log/day-06.md) |
 | Graceful shutdown and configuration reload on SIGHUP | met | in-flight requests finish on shutdown; SIGHUP verified against the real binary in [day 11](development-log/day-11.md) |
-| Throughput and latency thresholds met, no known bottleneck left in pprof | met, with a caveat | [performance report](performance-report.md): about 41,000 req/s, p99 7.7 ms at 100 connections. The p95 target at a thousand connections is discussed in [deviation 9](design-deviations.md) |
-| High unit test coverage in the critical modules, green integration suite | met | balancer 100%, observability 98.8%, health 97.9%, proxy 93.7%, config 89.7%, server 83.7%; 22 integration tests |
+| Throughput and latency thresholds met, no known bottleneck left in pprof | met, with a caveat | [performance report](performance-report.md): the balancer's own ceiling on trivial backends, and the three algorithms compared on profiled ones. The p95 target at a thousand connections is restated in [Appendix B, entry 10](technical-design/technical-design-v1.8-en.md#appendix-b--deviations-from-the-original-design) of the technical design |
+| High unit test coverage in the critical modules, green integration suite | met | `go test -race -cover ./...` runs in CI on every push and reports each package's coverage; the integration suite runs with it |
 | Structured logging, Prometheus `/metrics` and `/status` | met | [README, Observability](../README.md#observability) |
 | Multi-stage, small, non-root image; CI running lint, test and build | met | `Dockerfile` on distroless nonroot; `.github/workflows/ci.yml` and `release.yml` |
 | Security measures from section 6.3 applied | met | rate limiting, connection and body limits, framing validation, forwarded-header rewriting, govulncheck in CI, non-root image |
-| Protected `main`, every change through PR and CI, v1.0.0 tagged | partly | CI gates every push; the branch and pull request flow is not used, see [deviation 1](design-deviations.md) |
-| README, architecture diagrams and configuration reference complete | met | README, [development log](development-log/), [design deviations](design-deviations.md), [technical design](technical-design/) |
+| Protected `main`, every change through PR and CI, v1.0.0 tagged | partly | CI gates every push; the branch and pull request flow is not used, see [Appendix B, entry 1](technical-design/technical-design-v1.8-en.md#appendix-b--deviations-from-the-original-design) |
+| README, architecture diagrams and configuration reference complete | met | README, [development log](development-log/), and the [technical design](technical-design/) with its record of every deviation in Appendix B |
 
 ## Before tagging a release
 
@@ -77,10 +77,11 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
 ## Rolling back
 
 The system runs in a local and simulated environment, so no formal rollback procedure is defined
-(design document section 7.5). In principle, redeploying the previous image tag is the rollback:
+(design document section 7.5). In principle, redeploying the previous release's image is the
+rollback, where `vX.Y.Z` is the tag before the one being rolled back:
 
 ```bash
-docker pull ghcr.io/berkegemenoguz/ege-balancer:v0.9.0
+docker pull ghcr.io/berkegemenoguz/ege-balancer:vX.Y.Z
 ```
 
 Configuration is rolled back by restoring the previous file and sending SIGHUP; an invalid file
