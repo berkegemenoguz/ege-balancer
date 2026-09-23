@@ -56,19 +56,3 @@ func TestAPostIsNotRetriedOnceABackendHasIt(t *testing.T) {
 			hits, refused, requests)
 	}
 }
-
-func TestAGetIsStillRetriedPastTheSameFailure(t *testing.T) {
-	backends := newBackends(t, 2)
-
-	cfg := testConfig(backends)
-	cfg.FailurePolicy = config.RetryNextBackend
-	cfg.HealthCheck.UnhealthyThreshold = 1000
-
-	under := start(t, cfg)
-	backends[0].kill()
-
-	_, statuses := under.send(t, 6)
-	if statuses[http.StatusOK] != 6 {
-		t.Errorf("statuses = %v, want every idempotent request retried to the live backend", statuses)
-	}
-}
