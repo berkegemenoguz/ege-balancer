@@ -7,7 +7,7 @@
 | Yazar | Berk Egemen Oğuz |
 | Tarih | 11 Eylül 2026 |
 | Sürüm | 1.8 — v1.6'nın ve v1.7 revizyon notlarının yerini alır |
-| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2) ve profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8); v1.3.0'a kadar |
+| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2) profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8) ve gerçekçi mock backend'lerin ortaya çıkarıp v1.3.1'de düzeltilen üç hata (§11.1) |
 | Kod | `github.com/berkegemenoguz/ege-balancer` |
 | Dil | Türkçe. Aynı içerikteki İngilizce sürüm: [technical-design-v1.8-en.md](technical-design-v1.8-en.md) |
 
@@ -417,6 +417,13 @@ Sonraki her hata — `retry_on_5xx` açıkken gelen bir 5xx yanıt dahil — ist
 sayılan bir 503 ile bitirir; çünkü backend isteği yerine getirmiş ve yanıtını sonra kopan bir
 bağlantıya yazmış olabilir, ikinci bir deneme ikinci bir sipariş oluşturur (Ek B, 15. madde).
 
+Yanıt başladıktan sonraki bir hata farklıdır. Backend'in durum satırı ve başlıkları iletildikten
+sonra, yarıda kesilen bir yanıtı iletici retry döngüsü için bir hataya çeviremez; onun yerine
+istemcinin bağlantısını keser ve o noktada, metot ne olursa olsun, hiçbir şey yeniden denenemez.
+Deneme yine de backend'in hanesine yazılır — sağlık kontrolünde, circuit breaker'da ve
+`lb_backend_failures_total`'da — meğer ki istemcinin kendisi gitmiş olsun; bu backend'in hatası
+değildir. v1.3.1'den önce böyle bir deneme hiç sayılmıyordu (§11.1).
+
 ### 6.4 Devre kesici
 
 ```mermaid
@@ -460,6 +467,11 @@ anlık görüntüsüne aittir: bir yenileme yeni ve boş bir budget kurar, uçu�
 budget'ı korur; böylece hiçbir sayaç yanlış örnek üzerinde azaltılmaz. Budget varsayılan olarak
 açıktır; ondan söz etmeyen bir yapılandırma varsayılanları alır ve hafif trafik tam olarak eskisi
 gibi retry yapar.
+
+
+Bir retry, nasıl biterse bitsin budget'taki payını geri verir; iletici yanıtı yarıda kestiğinde de.
+v1.3.1'den önce böyle bir retry payını geri vermiyordu ve bunlar yeterince biriktiğinde bir sonraki
+yenilemeye kadar her retry reddediliyordu (§11.1).
 
 ### 6.6 İstemcinin gördüğü
 
@@ -635,11 +647,36 @@ program, `cmd/mockbackend`, her backend için bir profille çalıştırılıyor:
 | `capacity`, `queue` | aynı anda işlenen istekler ve bekleyebilecek istekler; kuyruğun ötesinde backend 503 döner |
 | `body-size` | ilk satırında backend'in adı bulunan yanıtın boyutu |
 | `error-rate` | 500 ile cevaplanan isteklerin payı |
+| `cache-size`, `miss-penalty` | `X-Session` ile anahtarlanan, hatırlanan istemci oturumları ve oturumu hatırlanmayan bir isteğin ek süresi |
+| `hang-rate`, `reset-rate`, `drip-rate`, `drip-over` | cevapsız bekletilen, yanıtın ortasında bağlantısı düşürülen ya da yanıtı `drip-over` boyunca damlatılan isteklerin payları |
+| `cold-start`, `cold-factor` | başladıktan sonra backend'in ne kadar süre yavaş olduğu ve başta ne kadar yavaş olduğu |
+| `pause-every`, `pause` | her dönemin sonunda, sağlık ucu dahil bütün sürecin durması |
+| `admin` | backend çalışırken arızaların başlatılıp temizlendiği ikinci bir port |
 | `seed` | gecikme ve hata dizisini tekrarlanabilir kılar |
 
 Gecikme yalnızca istek bir işçi tutarken harcanır; böylece kapasitesi düşük bir backend, gerçek bir
 sunucu gibi, yük altında kuyruğu büyüdükçe yavaşlar ve `/healthz`'i kuyruk yarıdan fazla doluyken
 503 döner. Her backend kendini ayrıca bir `X-Backend` başlığında da adlandırır.
+
+Sonraki ayarlar bir backend'i gerçek bir servise daha çok benzetir ve varsayılan ortamda hepsi
+kapalıdır. Bir istemciyi aynı backend'e geri göndermeyi değerli kılan şey önbellektir: backend'in
+oturumunu hatırladığı bir istek ıska cezasını atlar ve yanıt `X-Cache: hit` ya da `miss` der —
+önbellek olmadan oturum yapışkanlığı — §12 onun olmadığını belirtir — yalnızca bedelini
+gösterebilirdi. Arıza türleri, bir
+yük dengeleyicinin pratikte karşılaştığı ve bir 500'ün kapsamadığı durumlardır: hiç cevaplanmayan ve
+işçisini tutan bir istek, yanıtın ortasında kapanan bir bağlantı, eksiksiz ama geç gelen bir yanıt.
+Soğuk başlangıç ve duraklamalar zamanı profilin parçası yapar; duraklamalar tohumdan çekilen bir
+fazda gelir, böylece birlikte başlatılan backend'ler birlikte durmaz — ayrı süreçlerin çöp
+toplamaları da birlikte durmazdı. `deploy/docker-compose.realistic.yml` bunların hepsini düşük
+oranlarla açar.
+
+Yönetim portu, çalışan bir backend'de bir arızayı sınırlı bir süre için başlatır ve temizler; enjekte
+edilen bir arıza kendi türü için profilin oranına eklenmez, onun yerini alır ve en fazla on dakika
+sonra kendiliğinden biter. İki nedenle ayrı bir sunucudur. Yük dengeleyici trafik portundaki her
+yolu iletir; orada bir uç, yük dengeleyicinin her istemcisinin erişebileceği bir uç olurdu. Yönetim
+portu ise yalnızca loopback arayüzünde yayınlanır. Ayrıca oradaki hiçbir şey arıza katmanını
+beklemez; backend takılmış ya da donmuşken de, yani birinin onu durdurmak istediği tam o anda, cevap
+verir. Demo konsolunun arıza eylemi onu kullanır.
 
 | Backend'ler | Profil | Gecikme (medyan, p99) | Kapasite, kuyruk | Yanıt |
 | --- | --- | --- | --- | --- |
@@ -904,6 +941,30 @@ gerçekleşen iç içe geçmeleri bulduğudur: daha yavaş ve daha meşgul bir C
 geliştirme makinesinin üretmediği iç içe geçmeler üretti. Onları bulan, her push'ta tüm test
 paketini `-race` altında çalıştırmaktı.
 
+
+v1.3.0'dan sonra üç hata daha bulundu ve onları bulan şey §9.4'teki gerçekçi mock backend'ler oldu.
+Üçü de ancak bir alışverişin ortasında bir şey bozulduğunda görünür; önceki backend'ler bunu hiç
+yapmıyordu:
+
+- **Retry budget sızıyordu.** Go'nun ters proxy'si yarıda bozulan bir yanıtı geri dönerek değil panik
+  atarak keser; retry döngüsü ise bir retry'ın budget payını çağrı döndükten sonra geri veriyordu.
+  Kesilmiş bir yanıtla biten her retry payını kalıcı olarak tuttu; bunlar budget'ı doldurduğunda —
+  uçuşta yüz istekle yirmi — bir sonraki yenilemeye kadar her retry reddedildi. Geri verme artık
+  ertelenmiş (`defer`) olarak yapılıyor.
+- **Yarıda kesilen yanıtlar sayılmıyordu.** Aynı kesme kayıt işini de atlıyordu; yanıtlarını sürekli
+  yarıda kesen bir backend ne sağlık kontrolüne, ne circuit breaker'a, ne de hata metriğine
+  ulaşıyordu ve havuzdan hiç çıkarılmıyordu. Backend'in yanıtı artık, bir okuma başarısız olduğunda
+  denemeyi işaretleyen bir sarmalayıcıdan okunuyor ve hata, kesme geçerken kaydediliyor; istemcinin
+  kendisi kapatmadıysa.
+- **Dağıtılan yapılandırmalar yanıt zaman aşımını boşa çıkarıyordu.** `response_timeout` ile
+  `write_timeout` ikisi de on saniyeydi; takılan bir backend bırakıldığında istemcinin yazma süresi de
+  dolmuş oluyordu ve başarılı bir retry bile geri yazılamıyordu. Yapılandırmalar artık üç saniye
+  kullanıyor ve yük dengeleyici, yanıt zaman aşımının ikisinden kısa olanı olmadığı her yapılandırma
+  için uyarıyor.
+
+Her düzeltmenin, düzeltme geri alındığında başarısız olan bir testi var. İlk ikisi v1.1.0 ve
+v1.0.0'dan beri koddaydı; gerçekçi olanlardan önceki hiçbir backend onları gösteremezdi.
+
 ### 11.2 Tasarımın yanıldığı yerler ve bunun faydası
 
 Sapmaların çoğu (Ek B) iyileştirmedir; üçü davranışı tasarımın öngörmediği biçimlerde değiştirdi.
@@ -1035,7 +1096,7 @@ health_check:
 
 timeouts:                           # yeniden başlatma gerekir
   connect_timeout: 2s
-  response_timeout: 10s             # yazılmazsa read_timeout
+  response_timeout: 3s              # yazılmazsa read_timeout; write_timeout'tan kısa tutun
   read_timeout: 10s
   write_timeout: 10s
   idle_timeout: 60s
@@ -1053,6 +1114,10 @@ logging:
 `metrics_addr`, `response_timeout`, `budget_percent`, `min_retry_concurrency`, backend ağırlıkları
 ve loglama için varsayılanlar uygulanır. Bilinmeyen alanlar hatadır. "Yeniden başlatma gerekir"
 olarak işaretlenmeyen her şey `SIGHUP` ile uygulanır.
+
+`write_timeout`'tan kısa olmayan bir `response_timeout` kabul edilir ama başlangıçta ve her
+yenilemede uyarı olarak loglanır: takılan bir backend bırakıldığında, yazma zaman aşımından geriye
+kalan süre istemciyi başka bir backend'den cevaplamak için kalan süredir.
 
 ---
 
@@ -1260,13 +1325,16 @@ altında yavaş bir backend'den kaçınmayı korur — 200 isteğin 6 ile 11'i, 
 `cmd/mockbackend`: medyanı ve 99. yüzdeliğiyle belirlenen log-normal bir gecikme, ötesinde 503
 döndüğü sınırlı kuyruklu bir kapasite, bir yanıt boyutu ve bir hata oranı. Altı backend hızlı, ikisi
 daha yavaş ve daha az kapasiteli, biri zorlanan ve biri 256 KiB döndüren. Her biri adını hâlâ
-söylüyor, artık bir `X-Backend` başlığında da.
+söylüyor, artık bir `X-Backend` başlığında da. v1.3.0'dan sonra program istemci oturumlarını da
+hatırlıyor, bir 500'ün kapsamadığı biçimlerde hata veriyor, soğuk başlıyor ve duraklıyor, ve yük
+dengeleyicinin hiç iletmediği bir yönetim portu üzerinden çalışırken arıza alıyor.
 
 **Neden.** Üç sonuç `http-echo`'nun on baytı mikrosaniyede döndürmesine bağlıydı: uçuşta hiçbir
 zaman istek olmadığı için least connections gösterilemiyordu; yük testi iletimi on baytlık gövdeyle
 ölçüyordu; her backend eşit olduğu için de ağırlıklar ve kapasite farkları hiç sınanmıyordu. Sağlık
 kontrolü de yalnızca bir erişilebilirlik kontrolüydü; mock ise kuyruğu yarıdan fazla doluyken
-kendini sağlıksız bildiriyor.
+kendini sağlıksız bildiriyor. Sonraki eklemeler consistent hashing ve sticky session ekleme planıyla
+geldi: hiçbir şey hatırlamayan backend'lere karşı yapışkanlık yalnızca bedelini gösterebilir.
 
 ### B.14 Yük dengeleyici canlılık ve hazır olma sorgularına cevap verir
 
