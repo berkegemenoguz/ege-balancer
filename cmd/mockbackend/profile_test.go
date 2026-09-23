@@ -46,21 +46,22 @@ func TestSamplerRepeatsWithTheSameSeed(t *testing.T) {
 	}
 }
 
-func TestSamplerFailsAtTheConfiguredRate(t *testing.T) {
+func TestSamplerDrawsUniformly(t *testing.T) {
 	const draws = 100000
 
 	s := newSampler(profile{}, 1)
-	failures := 0
+	below := 0
 	for range draws {
-		if s.fails(0.1) {
-			failures++
+		u := s.draw()
+		if u < 0 || u >= 1 {
+			t.Fatalf("draw = %v, want a number in [0, 1)", u)
+		}
+		if u < 0.1 {
+			below++
 		}
 	}
-	if share := float64(failures) / draws; share < 0.095 || share > 0.105 {
-		t.Errorf("failed %.3f of draws, want about 0.1", share)
-	}
-	if s.fails(0) {
-		t.Error("failed with a rate of zero")
+	if share := float64(below) / draws; share < 0.095 || share > 0.105 {
+		t.Errorf("%.3f of draws fell below 0.1, want about 0.1", share)
 	}
 }
 
@@ -103,6 +104,14 @@ func TestProfileValidation(t *testing.T) {
 		{"negative capacity", func(p *profile) { p.capacity = -1 }, "capacity must not be negative"},
 		{"queue without capacity", func(p *profile) { p.capacity = 0 }, "queue needs a capacity"},
 		{"error rate above one", func(p *profile) { p.errorRate = 1.5 }, "between 0 and 1"},
+		{"hang rate above one", func(p *profile) { p.hangRate = 2 }, "hang-rate must be between 0 and 1"},
+		{"rates above every request", func(p *profile) { p.errorRate, p.hangRate = 0.6, 0.5 }, "add up to"},
+		{"negative cache", func(p *profile) { p.cacheSize = -1 }, "cache-size must not be negative"},
+		{"penalty without a cache", func(p *profile) { p.missPenalty = 10 * time.Millisecond }, "miss-penalty needs a cache-size"},
+		{"drip without a duration", func(p *profile) { p.dripRate = 0.1 }, "drip-rate needs a positive drip-over"},
+		{"cold factor below one", func(p *profile) { p.coldFactor = 0.5 }, "cold-factor must be at least 1"},
+		{"cold factor without a period", func(p *profile) { p.coldFactor = 4 }, "cold-factor needs a cold-start"},
+		{"pause as long as its period", func(p *profile) { p.pauseEvery, p.pause = time.Second, time.Second }, "must be longer than pause"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
