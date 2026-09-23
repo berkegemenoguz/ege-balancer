@@ -2,8 +2,8 @@
 
 A local console for driving the demo: it brings the stack up, then offers the actions one would
 otherwise type by hand — sustained traffic, measuring the distribution, stopping and starting
-backends, switching the algorithm, demonstrating the rate limit, reading the status, and putting
-everything back.
+backends, switching the algorithm, demonstrating the rate limit, making a backend misbehave,
+reading the status, and putting everything back.
 
 The prompt names the algorithm in force and whether traffic is flowing, so a change made several
 actions ago cannot quietly make the next measurement look wrong:
@@ -31,8 +31,8 @@ thing.
 
 It needs Docker running and the repository's compose file; it starts the stack itself, so there
 is nothing to prepare. Flags exist for every path and address it uses (`-compose`, `-config`,
-`-traffic`, `-status`, `-service`) if you run it from somewhere else or against a balancer on a
-different port.
+`-traffic`, `-status`, `-service`, `-admin-port`) if you run it from somewhere else or against a
+balancer on a different port.
 
 ## What it prints
 
@@ -58,6 +58,14 @@ through it, reports what the balancer refused and what the backends were therefo
 for the bucket to refill, and puts the limit back.
 
 Stopping a backend stops its compose service. `r` starts every backend again.
+
+Making a backend misbehave asks for the backend, the fault — hang, run slower, answer 500, drop the
+connection half way, drip the answer out, or freeze — its strength and how long it lasts, and sends
+it to the backend's admin port, published on this machine at 5781 for `backend-1` up to 5790 for
+`backend-10`. Nothing is changed on disk: every fault ends on its own after the time it was given,
+at most ten minutes. Until then the prompt names it, `7` lists what every backend reports in force,
+`r` clears the faults of every backend, and quitting clears the ones the console started, so that
+one left running cannot spoil the next measurement.
 
 If something is interrupted before the console can tidy up, one command puts the configuration
 back:

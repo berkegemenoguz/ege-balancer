@@ -44,11 +44,21 @@ distribution at one level.
   balancer's upstream pools are still filling. `-warmup` defaults to five seconds.
 - **A clean stop.** When the time is up, workers finish the request they are on rather than being
   cut off. A cancelled request fails every attempt inside the balancer and is counted there as a
-  refusal the load never caused.
+  refusal the load never caused. Throughput is divided by the measured window itself, not by the
+  time the last request took to finish: a request hanging for seconds would otherwise stretch the
+  window and understate every figure.
+- **What the client could not otherwise see.** An answer that begins and does not finish is a
+  failure, "answer cut off", whatever its status said. And Go's client sends an idempotent request
+  again, on a new connection, when the one it reused closes before any answer arrives; the balancer
+  never sees that as a retry, so the generator counts it.
 - **The backend that answered**, from the `X-Backend` header the mock backends set, which is how
   the distribution is reported without reading the balancer's metrics.
 - **The balancer's own counters**, read from `/metrics` at both ends of the measured window, so
   retries and refusals belong to the run rather than to everything since the balancer started.
+- **Sessions**, when `-keys` is given: each request names one of that many client sessions at random
+  in `X-Session`, and the backends' `X-Cache` answers give the share of requests whose session was
+  remembered. With more sessions than one backend can remember but fewer than the whole pool can,
+  that share says how well an algorithm keeps a client on the backend that knows it.
 - **The shape of the latency**, as a histogram in the JSON and, with `-histogram`, on the terminal.
   Percentiles hide whether a run has one hump or two, and under overload it has two.
 
@@ -64,6 +74,9 @@ Percentiles are by nearest rank over every recorded latency; nothing is sampled 
 | `-duration` | 20s | how long to measure |
 | `-warmup` | 5s | load applied before measuring, and discarded |
 | `-timeout` | 10s | timeout of a single request |
+| `-method` | GET | method of every request |
+| `-body-size` | 0 | bytes of body sent with every request |
+| `-keys` | 0 | client sessions to spread the requests over, named in `X-Session`; 0 names none |
 | `-metrics` | `http://127.0.0.1:8081/metrics` | counters endpoint; empty to skip |
 | `-histogram` | off | also print the latency distribution |
 | `-label` | — | recorded with the result, such as the algorithm in force |
