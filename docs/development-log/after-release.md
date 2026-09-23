@@ -612,3 +612,132 @@ what is checked here is the method that produced them.
 | The balancer's own counters across the matrix | unmoved in all 54 runs: every 503 came from a backend |
 | Counters and CPU samples taken inside the measured window | the generator scrapes `/metrics` at both ends; `docker stats` starts after the warmup |
 | `cmd/loadgen` unit tests | percentiles, aggregation, failure classification, metric parsing, the histogram, per-backend timings, the warmup boundary and an unreachable target |
+
+## Realistic mock backends
+
+**Why.** Consistent hashing and sticky sessions come next, and both are about sending a client back
+to the backend that knows it. Against backends that remember nothing, that can show only its cost.
+The backends also failed only at the edges — a refused connection, an immediate 500 — never in the
+middle of an exchange, where most of what a balancer has to handle happens.
+
+### What was built
+
+- In `cmd/mockbackend`: a bounded cache of client sessions named in `X-Session`, with a penalty on
+  a miss and `X-Cache: hit` or `miss` on the answer; faults — hang, drop the connection half way
+  through the answer, drip the answer out, 500, run slower, freeze; a cold start and pauses; and an
+  admin port through which a fault is started on one backend for a limited time. All of it is off
+  by default.
+- `deploy/docker-compose.realistic.yml`, which turns the steady versions on for every backend, and
+  admin ports published on the loopback interface only, at 5781 to 5790.
+- In the demo console, action `8` to make a backend misbehave, the faults in force on the prompt,
+  and `r` and `q` clearing them.
+- In `cmd/loadgen`, sessions to spread requests over, the hit rate, a method and a body.
+
+### Decisions
+
+**A separate admin port.** The balancer forwards every path on the traffic port, so an endpoint
+there could be reached by any of its clients. And nothing on the admin port waits on the fault
+layer, so it answers while the backend is hanging or frozen, which is exactly when someone wants to
+stop it.
+
+**Every injected fault ends on its own**, after at most ten minutes, so one left behind by a
+demonstration cannot spoil the next measurement for long. An injected fault replaces the profile's
+rate for its mode rather than adding to it.
+
+**Hang holds its worker, freeze stops the health check.** A hung request is a thread stuck on a
+lock: it occupies capacity, but the process still answers its probe. A freeze is the whole process
+stopped, probe included. Balancers treat the two very differently, which is the point of having
+both.
+
+**Pauses at a phase of their own.** Ten backends started together with "a pause every fifteen
+seconds" would all pause at the same moment, and the whole pool would stall at once. Each backend
+draws its phase from its seed; the collections of separate processes have nothing to do with each
+other.
+
+**A cache sized against the key pool.** Affinity only pays when the sessions outnumber what one
+backend can remember but fit in the pool as a whole: 5,000 per backend against a pool of 30,000.
+
+### What went wrong
+
+**A hanging POST never let go of its worker.** Go's server notices a client leaving only once the
+request body has been read, and the mock never read it. Every POST that hung held its worker for
+good, and after one run backend-3 answered nothing at all, the fault long cleared. The mock now
+reads the request before serving it, as a server that parses it would.
+
+**The first explanation of a live result was wrong.** A run with backend-3 cutting its answers off
+showed the balancer retrying, which an answer already on its way cannot be. The balancer's log
+settled it: every failure on backend-3 was a header timeout — it was still stuck from the POST
+problem above, not cutting anything off.
+
+**The generator could not see two things.** It counted an answer cut off half way as a success,
+because it ignored the error from reading the body; and Go's client sends a GET again, on a new
+connection, when the one it reused dies before any answer, so a cut-off GET came back as a 200. Both
+are now counted.
+
+**The generator's window stretched.** Workers finish the request they are on when the time is up,
+and a request hanging for seconds kept the run going long after its window; throughput was divided
+by the longer time. It is now divided by the window. The same stretch, 2 to 5 per cent at the
+median, understated the throughput of the second measurement campaign, which the performance report
+now says.
+
+**Measuring these faults exposed three defects in the balancer itself**, recorded in the next
+section.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `/faults` through the balancer | an ordinary answer from a backend; the admin endpoints are unreachable there |
+| Where the admin ports are bound | `127.0.0.1` only |
+| 30,000 sessions over the pool for 15 s | 3.1% hits: each backend had seen about a twentieth of the keys, as a short run should |
+| A backend restarted with a cold start | factor 3.9 just after, 2.45 at 15 s, 1 at 30 s |
+| A backend hanging every POST, then cleared | answers again at once, with no worker held |
+| The console's fault action, driven through its prompts | the fault injected, named on the prompt, listed by `7`, cleared on quitting |
+| `cmd/mockbackend` unit tests | 85.5% of statements; each timing test stable over 15 runs on two CPUs |
+
+## Three defects the realistic backends exposed
+
+**Why.** Faulting the new mock backends under load gave numbers that did not add up: 33 failed
+attempts on one backend but one retry counted; 89 refusals for lack of retry budget with a single 503
+at the client; POSTs counted as `not_retryable` while every client saw a 200. Two scratch tests and a
+look at the balancer's own log traced it to three defects, all of them only visible when something
+fails in the middle of an exchange.
+
+### What was wrong
+
+- **The retry budget leaked.** Go's reverse proxy aborts an answer that fails part way through by
+  panicking, and the retry loop gave a retry's share back only after the call returned. A scratch
+  test left one retry in flight with no request in flight. With a hundred requests in flight the
+  budget allows twenty retries, and after twenty such leaks `lb_retries_total` stopped at 20 while
+  every later retry was refused — until the next reload. In v1.1.0 since the budget was added.
+- **Answers broken off part way were invisible.** The same abort skipped the bookkeeping: the
+  scratch test's health checker heard neither a success nor a failure. A backend that kept cutting
+  its answers short was never taken out of the pool. In the code since v1.0.0.
+- **The shipped configurations defeated the response timeout.** Both timeouts were ten seconds; a
+  backend abandoned after ten seconds left none to answer the client from another, and the client
+  got an empty reply. The deployment checklist already said the response timeout must be the shorter.
+
+### What was done
+
+- The retry's share of the budget is given back in a deferred call, which runs through a panic.
+- The backend's answer is read through a wrapper that marks the attempt when a read fails. As the
+  abort passes through, the failure is recorded against the backend — health checker, circuit
+  breaker, `lb_backend_failures_total` — and the panic carries on, so the client's connection is
+  still closed rather than left with half an answer. A client that hangs up is not the backend's
+  failure and is not counted.
+- `response_timeout` is 3 s in the three configurations, against a write timeout of 10 s, and a
+  configuration whose response timeout is not the shorter is logged as a warning at start and on
+  every reload. A warning rather than an error, because a patch release should not refuse a
+  configuration that loaded before.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| A retry whose answer is broken off | the budget is back to zero afterwards; with the fix reverted, one retry stays held |
+| A backend breaking off its answer | one failure reported to the health checker and in `lb_backend_failures_total`; with the fix reverted, none |
+| A client hanging up part way through an answer | no failure counted; with the client check removed, the backend is blamed |
+| Live, every run after the fix | retries allowed in each — from 20 to 235 per run — and not one refused for lack of budget |
+| Live, a backend hanging every POST | 503 as `not_retryable` after 3 s, where before the client got an empty reply after 10 s |
+| Live, a backend cutting off every answer | 33 failures recorded against it as `unexpected EOF`; the cut-off GETs sent again by the client, 27 of them, the POSTs failing at the client, 24 |
+| The whole suite with the race detector | green; `internal/proxy` at 95.2% of statements |
