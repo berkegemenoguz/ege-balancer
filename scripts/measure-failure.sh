@@ -20,10 +20,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-compose=(docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.measure.yml)
-config=configs/lb.measure.yaml
-status=127.0.0.1:8081
-results=measurements
+# shellcheck source=scripts/lib.sh
+source scripts/lib.sh
 
 victim=${VICTIM:-backend-1}
 connections=${CONNECTIONS:-600}
@@ -47,21 +45,6 @@ if [ ${#algorithms[@]} -eq 0 ]; then
 fi
 
 mkdir -p "$results"
-
-switch() {
-  perl -pi -e "s/^algorithm: .*/algorithm: $1              # the measurement script rewrites this/" "$config"
-  "${compose[@]}" kill -s HUP loadbalancer >/dev/null
-
-  for _ in $(seq 1 40); do
-    if curl -sf "$status/status" | grep -q "\"algorithm\":\"$1\""; then
-      return 0
-    fi
-    sleep 0.5
-  done
-
-  echo "the balancer did not switch to $1" >&2
-  exit 1
-}
 
 # whole waits until the balancer sees every backend healthy again, so the next
 # algorithm does not start a backend short.
