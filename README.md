@@ -377,15 +377,14 @@ implementation can be replaced without touching the packages that use it.
 ## Documentation
 
 - [Technical design](docs/technical-design/) — the design as a paper, in English and Turkish:
-  architecture, algorithms, failure handling and the evaluation. The original design the project
-  was built to and its revision notes are kept beside it.
+  architecture, algorithms, failure handling and the evaluation, with every departure from the
+  original design recorded in its Appendix B. The original design the project was built to is kept
+  beside it.
 - [Development log](docs/development-log/) — one page per day of the plan, and one for the work
   after the release: what was built, which decisions were taken and why, what went wrong, and how
   the result was verified.
 - [Performance report](docs/performance-report.md) — the load testing method, the bottlenecks
   profiling exposed, throughput and latency before and after each fix, and the benchmarks.
-- [Design deviations](docs/design-deviations.md) — every place the implementation departs from
-  the original design, with the reasoning.
 - [Deployment checklist](docs/deployment-checklist.md) — the production readiness criteria and
   their evidence, and what to check before a release and before real traffic.
 
