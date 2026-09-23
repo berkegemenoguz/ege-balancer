@@ -189,6 +189,12 @@ fresh seed per run, which is why each cell is run three times and reported as a 
 range: a gap narrower than that range is not a result. The generator runs on the host and is
 therefore absent from the CPU table below, while competing for the same cores as everything in it.
 
+The generator used for this campaign divided each run's requests by the time until its last request
+finished rather than by the measured window. Waiting for the requests still in flight stretched the
+window by 2 to 5 per cent at the median and by 12 per cent at worst, so the throughput figures below
+are understated by about as much. Every algorithm at a level carried a similar stretch, so the
+comparisons hold; the generator has since been corrected to divide by the window itself.
+
 ### What the pool can take
 
 The profiles bound the pool before the balancer does. Each backend serves `capacity` requests at

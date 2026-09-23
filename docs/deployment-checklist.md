@@ -43,7 +43,8 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
 - [ ] `limits.max_connections` fits the file descriptor limit of the host
 - [ ] `limits.rate_limit_per_ip` reflects what a legitimate client actually sends, or is 0
 - [ ] `timeouts.response_timeout` is shorter than the client-facing `write_timeout`, so a stalled
-      backend is abandoned and retried rather than killing the client's request
+      backend is abandoned and retried rather than killing the client's request; the balancer logs a
+      warning at start when it is not
 - [ ] `failure_policy` matches the priority: `retry_next_backend` for availability, `fail_fast`
       for latency, `circuit_breaker` to protect a struggling backend
 - [ ] Under `retry_next_backend`, `retry.budget_percent` is the extra load the backends can take
