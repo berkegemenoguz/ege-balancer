@@ -10,9 +10,8 @@
 
 > Bu dosya, uygulama başlamadan önce yazılan özgün PDF belgesinin Markdown'a aktarılmış
 > halidir. Metin değiştirilmemiştir; şekiller aynı içerikle diyagram olarak yeniden çizilmiş,
-> Gantt şeması tabloya dönüştürülmüştür. Uygulama sonrası güncellemeler için
-> [v1.7 revizyon notlarına](revision-notes-v1.7-tr.md), güncel belge için
-> [v1.8'e](technical-design-v1.8-tr.md) bakın.
+> Gantt şeması tabloya dönüştürülmüştür. Güncel belge ve uygulamanın bu tasarımdan ayrıldığı
+> her yer için [v1.8'e](technical-design-v1.8-tr.md) bakın.
 
 ## İçindekiler
 
