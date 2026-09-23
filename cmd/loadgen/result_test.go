@@ -75,3 +75,25 @@ func TestSummariseOfAnEmptyRun(t *testing.T) {
 		t.Errorf("empty run reported %d requests at %.2f/s, want none", got.Requests, got.Throughput)
 	}
 }
+
+func TestSummariseCountsTheCacheAnswers(t *testing.T) {
+	all := newSamples()
+	for _, answer := range []string{"hit", "hit", "hit", "miss", ""} {
+		all.record(time.Millisecond, 200, "backend-1", 0)
+		all.recordCache(answer)
+	}
+
+	got := summarise(all, 1, time.Second)
+	if got.Cache == nil || got.Cache.Hits != 3 || got.Cache.Misses != 1 || got.Cache.HitRate != 0.75 {
+		t.Errorf("cache = %+v, want 3 hits, 1 miss and a 75%% hit rate", got.Cache)
+	}
+}
+
+func TestWithoutSessionsThereIsNoCacheToReport(t *testing.T) {
+	all := newSamples()
+	all.record(time.Millisecond, 200, "backend-1", 0)
+
+	if got := summarise(all, 1, time.Second); got.Cache != nil {
+		t.Errorf("cache = %+v, want none reported when no answer mentioned it", got.Cache)
+	}
+}

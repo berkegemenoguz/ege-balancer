@@ -17,6 +17,12 @@ type samples struct {
 	perBackend map[string][]time.Duration
 	failures   map[string]int
 	bytes      int64
+	// cacheHits and cacheMisses count the backends' answers about whether they
+	// remembered the client, when the requests name one.
+	cacheHits   int
+	cacheMisses int
+	// clientRetries counts requests Go's client sent again by itself.
+	clientRetries int
 }
 
 // newSamples returns an empty set, with room for a run's worth of latencies.
@@ -41,6 +47,22 @@ func (s *samples) record(took time.Duration, status int, backend string, bytes i
 	s.bytes += bytes
 }
 
+// recordCache counts a backend's answer about its cache: "hit", "miss", or
+// nothing when the request named no session.
+func (s *samples) recordCache(answer string) {
+	switch answer {
+	case "hit":
+		s.cacheHits++
+	case "miss":
+		s.cacheMisses++
+	}
+}
+
+// recordClientRetry counts a request the client sent again on a new connection.
+func (s *samples) recordClientRetry() {
+	s.clientRetries++
+}
+
 // recordFailure adds one request that never produced an answer.
 func (s *samples) recordFailure(kind string) {
 	s.failures[kind]++
@@ -50,6 +72,9 @@ func (s *samples) recordFailure(kind string) {
 func (s *samples) merge(other *samples) {
 	s.latencies = append(s.latencies, other.latencies...)
 	s.bytes += other.bytes
+	s.cacheHits += other.cacheHits
+	s.cacheMisses += other.cacheMisses
+	s.clientRetries += other.clientRetries
 	for status, n := range other.statuses {
 		s.statuses[status] += n
 	}
@@ -64,30 +89,36 @@ func (s *samples) merge(other *samples) {
 	}
 }
 
-// cancelled is the failure kind of a request the run itself cut off at the
-// deadline. It is reported apart from the failures the balancer caused.
-const cancelled = "cancelled"
+const (
+	// cancelled is the failure kind of a request the run itself cut off at the
+	// deadline. It is reported apart from the failures the balancer caused.
+	cancelled = "cancelled"
+	// cutOff is the failure kind of an answer that began and did not finish.
+	cutOff = "answer cut off"
+)
 
 // result is one finished run, in the shape the report quotes.
 type result struct {
-	Algorithm   string         `json:"algorithm,omitempty"`
-	Connections int            `json:"connections"`
-	Duration    string         `json:"duration"`
-	Requests    int            `json:"requests"`
-	Failures    int            `json:"failures"`
-	CutOff      int            `json:"cut_off_at_the_deadline"`
-	Throughput  float64        `json:"throughput_per_second"`
-	MegabytesPS float64        `json:"megabytes_per_second"`
-	P50         string         `json:"p50"`
-	P95         string         `json:"p95"`
-	P99         string         `json:"p99"`
-	Max         string         `json:"max"`
-	Counters    map[string]int `json:"balancer_counters,omitempty"`
-	Histogram   []bucket       `json:"histogram,omitempty"`
-	PerBackend  []timing       `json:"per_backend,omitempty"`
-	Statuses    map[int]int    `json:"statuses"`
-	Backends    map[string]int `json:"backends"`
-	FailureKind map[string]int `json:"failure_kinds,omitempty"`
+	Algorithm     string         `json:"algorithm,omitempty"`
+	Connections   int            `json:"connections"`
+	Duration      string         `json:"duration"`
+	Requests      int            `json:"requests"`
+	Failures      int            `json:"failures"`
+	CutOff        int            `json:"cut_off_at_the_deadline"`
+	ClientRetries int            `json:"sent_again_by_the_client,omitempty"`
+	Throughput    float64        `json:"throughput_per_second"`
+	MegabytesPS   float64        `json:"megabytes_per_second"`
+	P50           string         `json:"p50"`
+	P95           string         `json:"p95"`
+	P99           string         `json:"p99"`
+	Max           string         `json:"max"`
+	Cache         *cacheResult   `json:"cache,omitempty"`
+	Counters      map[string]int `json:"balancer_counters,omitempty"`
+	Histogram     []bucket       `json:"histogram,omitempty"`
+	PerBackend    []timing       `json:"per_backend,omitempty"`
+	Statuses      map[int]int    `json:"statuses"`
+	Backends      map[string]int `json:"backends"`
+	FailureKind   map[string]int `json:"failure_kinds,omitempty"`
 }
 
 // summarise turns the merged samples of a run into a result.
@@ -102,25 +133,44 @@ func summarise(all *samples, connections int, took time.Duration) result {
 		failures += n
 	}
 
+	var remembered *cacheResult
+	if answered := all.cacheHits + all.cacheMisses; answered > 0 {
+		remembered = &cacheResult{
+			Hits:    all.cacheHits,
+			Misses:  all.cacheMisses,
+			HitRate: float64(all.cacheHits) / float64(answered),
+		}
+	}
+
 	seconds := took.Seconds()
 	return result{
-		Connections: connections,
-		Duration:    took.Round(time.Millisecond).String(),
-		Requests:    len(all.latencies),
-		Failures:    failures,
-		CutOff:      all.failures[cancelled],
-		Throughput:  float64(len(all.latencies)) / seconds,
-		MegabytesPS: float64(all.bytes) / seconds / (1 << 20),
-		P50:         percentile(all.latencies, 0.50).Round(100 * time.Microsecond).String(),
-		P95:         percentile(all.latencies, 0.95).Round(100 * time.Microsecond).String(),
-		P99:         percentile(all.latencies, 0.99).Round(100 * time.Microsecond).String(),
-		Max:         percentile(all.latencies, 1).Round(100 * time.Microsecond).String(),
-		Histogram:   distribution(all.latencies),
-		PerBackend:  timings(all.perBackend),
-		Statuses:    all.statuses,
-		Backends:    all.backends,
-		FailureKind: all.failures,
+		Connections:   connections,
+		Duration:      took.Round(time.Millisecond).String(),
+		Requests:      len(all.latencies),
+		Failures:      failures,
+		CutOff:        all.failures[cancelled],
+		ClientRetries: all.clientRetries,
+		Throughput:    float64(len(all.latencies)) / seconds,
+		MegabytesPS:   float64(all.bytes) / seconds / (1 << 20),
+		P50:           percentile(all.latencies, 0.50).Round(100 * time.Microsecond).String(),
+		P95:           percentile(all.latencies, 0.95).Round(100 * time.Microsecond).String(),
+		P99:           percentile(all.latencies, 0.99).Round(100 * time.Microsecond).String(),
+		Max:           percentile(all.latencies, 1).Round(100 * time.Microsecond).String(),
+		Cache:         remembered,
+		Histogram:     distribution(all.latencies),
+		PerBackend:    timings(all.perBackend),
+		Statuses:      all.statuses,
+		Backends:      all.backends,
+		FailureKind:   all.failures,
 	}
+}
+
+// cacheResult is how often the backends remembered the client a request came
+// from.
+type cacheResult struct {
+	Hits    int     `json:"hits"`
+	Misses  int     `json:"misses"`
+	HitRate float64 `json:"hit_rate"`
 }
 
 // timing is how one backend answered: how much of the traffic it took and how

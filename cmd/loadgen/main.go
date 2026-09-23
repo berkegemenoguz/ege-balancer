@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,8 +15,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"sort"
 	"strconv"
@@ -25,9 +28,27 @@ import (
 	"time"
 )
 
-// backendHeader is the header the mock backends answer with, which is how the
-// generator can report the distribution without reading the balancer's metrics.
-const backendHeader = "X-Backend"
+const (
+	// backendHeader is the header the mock backends answer with, which is how
+	// the generator reports the distribution without reading the balancer's
+	// metrics.
+	backendHeader = "X-Backend"
+	// sessionHeader names the client a request comes from, and cacheHeader is
+	// the mock backend's answer to whether it remembered that client.
+	sessionHeader = "X-Session"
+	cacheHeader   = "X-Cache"
+)
+
+// load is what every request of a run looks like.
+type load struct {
+	url    string
+	method string
+	// body is sent with every request; nil sends none.
+	body []byte
+	// keys is how many client sessions the requests are spread over, each
+	// request naming one at random; zero names none.
+	keys int
+}
 
 func main() {
 	target := flag.String("addr", "http://127.0.0.1:8080", "address of the balancer to drive")
@@ -37,6 +58,9 @@ func main() {
 	warmup := flag.Duration("warmup", 5*time.Second, "load applied before measuring starts, and discarded")
 	timeout := flag.Duration("timeout", 10*time.Second, "timeout of a single request")
 	metrics := flag.String("metrics", "http://127.0.0.1:8081/metrics", "balancer metrics endpoint, read at both ends of the measurement window; empty to skip")
+	method := flag.String("method", http.MethodGet, "method of every request")
+	bodySize := flag.Int("body-size", 0, "bytes of body sent with every request")
+	keys := flag.Int("keys", 0, "client sessions to spread the requests over, named in X-Session; 0 names none")
 	label := flag.String("label", "", "label recorded with the result, such as the algorithm in force")
 	shape := flag.Bool("histogram", false, "also print the latency distribution")
 	out := flag.String("json", "", "also write the result as JSON to this file")
@@ -45,8 +69,16 @@ func main() {
 	if *connections < 1 {
 		log.Fatal("connections must be at least 1")
 	}
+	if *bodySize < 0 || *keys < 0 {
+		log.Fatal("body-size and keys must not be negative")
+	}
 
-	summary := run(*target+*path, *metrics, *connections, *warmup, *duration, *timeout)
+	traffic := load{url: *target + *path, method: strings.ToUpper(*method), keys: *keys}
+	if *bodySize > 0 {
+		traffic.body = bytes.Repeat([]byte("x"), *bodySize)
+	}
+
+	summary := run(traffic, *metrics, *connections, *warmup, *duration, *timeout)
 	summary.Algorithm = *label
 
 	fmt.Print(summary.text())
@@ -68,7 +100,7 @@ func main() {
 // Workers are asked to stop rather than cut off, so the run ends with no
 // request in flight. A cancelled request would otherwise fail every attempt at
 // the balancer and be counted there as a refusal the load never caused.
-func run(url, metricsURL string, connections int, warmup, duration, timeout time.Duration) result {
+func run(shape load, metricsURL string, connections int, warmup, duration, timeout time.Duration) result {
 	client := &http.Client{
 		Timeout:   timeout,
 		Transport: transport(connections),
@@ -86,7 +118,7 @@ func run(url, metricsURL string, connections int, warmup, duration, timeout time
 	for i := range connections {
 		measured[i] = newSamples()
 		wg.Go(func() {
-			drive(client, url, measureFrom, &done, measured[i])
+			drive(client, shape, measureFrom, &done, measured[i])
 		})
 	}
 	// The counters are read once the warmup is over and again at the end, so
@@ -94,7 +126,11 @@ func run(url, metricsURL string, connections int, warmup, duration, timeout time
 	before := readCounters(context.Background(), metricsURL, time.Until(measureFrom))
 
 	wg.Wait()
-	took := time.Since(measureFrom)
+	// Throughput is over the measured window itself. Requests that started in it
+	// count even when they finish after it, but the time spent waiting for them
+	// does not: a request hanging for ten seconds would otherwise stretch the
+	// window and understate every figure divided by it.
+	took := duration
 	moved := before.since(readCounters(context.Background(), metricsURL, 0))
 
 	all := newSamples()
@@ -142,7 +178,7 @@ func transport(connections int) http.RoundTripper {
 
 // drive sends requests one after another until the run is done, recording into
 // hot once the warmup is over. Requests sent during the warmup are discarded.
-func drive(client *http.Client, url string, measureFrom time.Time, done *atomic.Bool, hot *samples) {
+func drive(client *http.Client, shape load, measureFrom time.Time, done *atomic.Bool, hot *samples) {
 	discard := newSamples()
 
 	for !done.Load() {
@@ -150,29 +186,54 @@ func drive(client *http.Client, url string, measureFrom time.Time, done *atomic.
 		if time.Now().Before(measureFrom) {
 			into = discard
 		}
-		request(context.Background(), client, url, into)
+		request(context.Background(), client, shape, into)
 	}
 }
 
 // request sends one request and records its outcome.
-func request(ctx context.Context, client *http.Client, url string, into *samples) {
-	attempt, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func request(ctx context.Context, client *http.Client, shape load, into *samples) {
+	var body io.Reader
+	if shape.body != nil {
+		body = bytes.NewReader(shape.body)
+	}
+	attempt, err := http.NewRequestWithContext(ctx, shape.method, shape.url, body)
 	if err != nil {
 		into.recordFailure("request")
 		return
 	}
+	if shape.keys > 0 {
+		attempt.Header.Set(sessionHeader, "session-"+strconv.Itoa(rand.IntN(shape.keys)))
+	}
+
+	// Go's client sends an idempotent request again, on a new connection, when
+	// the one it reused closes before any answer arrives. The balancer counts
+	// nothing for that, so the generator counts the connections a request took.
+	connections := 0
+	attempt = attempt.WithContext(httptrace.WithClientTrace(attempt.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connections++ },
+	}))
 
 	started := time.Now()
 	response, err := client.Do(attempt)
+	if connections > 1 {
+		into.recordClientRetry()
+	}
 	if err != nil {
 		into.recordFailure(failureKind(err))
 		return
 	}
 
-	read, _ := io.Copy(io.Discard, response.Body)
+	read, err := io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
+	if err != nil {
+		// The answer began and did not finish: whatever its status said, the
+		// client did not get it.
+		into.recordFailure(cutOff)
+		return
+	}
 
 	into.record(time.Since(started), response.StatusCode, response.Header.Get(backendHeader), read)
+	into.recordCache(response.Header.Get(cacheHeader))
 }
 
 // failureKind groups the errors a run can produce, so that a timeout is not
@@ -216,7 +277,13 @@ func (r result) text() string {
 	fmt.Fprintf(&out, "  requests   %d (%.0f/s, %.1f MB/s)\n", r.Requests, r.Throughput, r.MegabytesPS)
 	fmt.Fprintf(&out, "  latency    p50 %s   p95 %s   p99 %s   max %s\n", r.P50, r.P95, r.P99, r.Max)
 	fmt.Fprintf(&out, "  statuses   %s\n", counts(r.Statuses))
+	if r.Cache != nil {
+		fmt.Fprintf(&out, "  cache      %d hits, %d misses (%.1f%% hit)\n", r.Cache.Hits, r.Cache.Misses, 100*r.Cache.HitRate)
+	}
 
+	if r.ClientRetries > 0 {
+		fmt.Fprintf(&out, "  client     %d requests sent again by the client on a new connection\n", r.ClientRetries)
+	}
 	if r.Failures > 0 {
 		fmt.Fprintf(&out, "  failures   %d — %s\n", r.Failures, named(withoutCancelled(r.FailureKind)))
 	}
