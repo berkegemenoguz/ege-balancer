@@ -27,6 +27,7 @@ func main() {
 	trafficURL := flag.String("traffic", "http://127.0.0.1:8080/", "address serving proxied traffic")
 	statusURL := flag.String("status", "http://127.0.0.1:8081/status", "address serving the status document")
 	service := flag.String("service", "loadbalancer", "compose service running the balancer")
+	adminPort := flag.Int("admin-port", 5781, "admin port of backend-1 on this machine; backend-N's is this plus N-1")
 	flag.Parse()
 
 	env := &environment{
@@ -35,6 +36,7 @@ func main() {
 		trafficURL:  *trafficURL,
 		statusURL:   *statusURL,
 		service:     *service,
+		adminPort:   *adminPort,
 		client:      &http.Client{Timeout: 10 * time.Second},
 	}
 
@@ -65,11 +67,12 @@ func run(ctx context.Context, con *console, env *environment) error {
 
 	flow := &traffic{url: env.trafficURL, client: env.client}
 	defer flow.halt()
+	book := newFaultBook(time.Now)
 
 	welcome(con, env, current)
 
 	for ctx.Err() == nil {
-		switch choice := con.ask(prompt(ctx, env, flow)); choice {
+		switch choice := con.ask(prompt(ctx, env, flow, book)); choice {
 		case "1":
 			toggleTraffic(con, flow)
 		case "2":
@@ -84,10 +87,12 @@ func run(ctx context.Context, con *console, env *environment) error {
 			demonstrateRateLimit(ctx, con, env, flow)
 		case "7":
 			showStatus(ctx, con, env)
+		case "8":
+			misbehave(ctx, con, env, book)
 		case "r":
-			reset(ctx, con, env, flow, baseline)
+			reset(ctx, con, env, flow, book, baseline)
 		case "q", "":
-			return leave(ctx, con, env, flow, baseline)
+			return leave(ctx, con, env, flow, book, baseline)
 		case "?":
 			welcome(con, env, mustStatus(ctx, env))
 		default:
@@ -115,15 +120,16 @@ func welcome(con *console, env *environment, current status) {
 	con.step("2  measure the distribution over 30 requests")
 	con.step("3  stop a backend            4  start a backend")
 	con.step("5  change the algorithm      6  demonstrate the rate limit")
-	con.step("7  show the status           r  reset everything")
-	con.step("q  quit                      ?  show this again")
+	con.step("7  show the status           8  make a backend misbehave")
+	con.step("r  reset everything          q  quit")
+	con.step("?  show this again")
 	con.note("every action prints the command it runs, so it can be repeated by hand")
 }
 
-// prompt renders the menu prompt. It names the algorithm in force, because a
-// change made several actions ago is otherwise easy to forget and makes the
-// next measurement look wrong.
-func prompt(ctx context.Context, env *environment, flow *traffic) string {
+// prompt renders the menu prompt. It names the algorithm in force and the
+// faults the console started, because a change made several actions ago is
+// otherwise easy to forget and makes the next measurement look wrong.
+func prompt(ctx context.Context, env *environment, flow *traffic, book *faultBook) string {
 	state := mustStatus(ctx, env).Algorithm
 	if state == "" {
 		state = "unreachable"
@@ -131,7 +137,84 @@ func prompt(ctx context.Context, env *environment, flow *traffic) string {
 	if flow.running() {
 		state += " · traffic on"
 	}
+	if faults := book.summary(); faults != "" {
+		state += " · " + faults
+	}
 	return "[" + state + "] action?"
+}
+
+// misbehave makes one backend misbehave for a while, through its admin port.
+func misbehave(ctx context.Context, con *console, env *environment, book *faultBook) {
+	services := env.services(mustStatus(ctx, env))
+	if len(services) == 0 {
+		con.fail("no backends are configured")
+		return
+	}
+
+	con.blank()
+	for i, service := range services {
+		con.step("%2d  %s", i+1, service)
+	}
+	answer := con.ask("which one?")
+	index, ok := pick(answer, len(services))
+	if !ok {
+		con.warn("no backend %q in the list", answer)
+		return
+	}
+	service := services[index]
+
+	con.blank()
+	for i, kind := range faultKinds {
+		con.step("%d  %s", i+1, kind.describe)
+	}
+	answer = con.ask("which fault?")
+	choice, ok := pick(answer, len(faultKinds))
+	if !ok {
+		con.warn("no fault %q in the list", answer)
+		return
+	}
+	kind := faultKinds[choice]
+
+	strength := ""
+	switch kind.strength {
+	case "rate":
+		strength = orDefault(con.ask("share of requests, above 0 and at most 1 [1]"), "1")
+	case "factor":
+		strength = orDefault(con.ask("how many times slower [4]"), "4")
+	}
+
+	answer = orDefault(con.ask("for how long [30s]"), "30s")
+	lasts, err := time.ParseDuration(answer)
+	if err != nil || lasts <= 0 || lasts > maxFaultDuration {
+		con.warn("%q is not a duration such as 30s or 2m, up to %s", answer, maxFaultDuration)
+		return
+	}
+
+	if err := env.injectFault(ctx, con, service, faultForm(kind, strength, lasts)); err != nil {
+		con.fail("%v", err)
+		return
+	}
+	book.add(service, kind.doing, lasts)
+	con.ok("%s is %s for %s", service, kind.doing, lasts)
+	con.note("%s", kind.expect)
+}
+
+// pick reads a menu choice numbered from one, and returns its index.
+func pick(answer string, count int) (int, bool) {
+	n, err := strconv.Atoi(answer)
+	if err != nil || n < 1 || n > count {
+		return 0, false
+	}
+	return n - 1, true
+}
+
+// orDefault returns the answer, or the default when the operator just pressed
+// enter.
+func orDefault(answer, fallback string) string {
+	if answer == "" {
+		return fallback
+	}
+	return answer
 }
 
 // toggleTraffic starts or stops the background stream.
@@ -334,23 +417,54 @@ func showStatus(ctx context.Context, con *console, env *environment) {
 		}
 		con.step("%-20s weight %d  %-10s %d active", backend.Addr, backend.Weight, state, backend.Active)
 	}
+
+	services := env.services(current)
+	if len(services) == 0 {
+		return
+	}
+	con.echo(fmt.Sprintf("for port in $(seq %d %d); do curl -s 127.0.0.1:$port/faults; done",
+		env.adminPort, env.adminPort+len(services)-1))
+	injected := false
+	for _, service := range services {
+		faults, err := env.injectedFaults(ctx, service)
+		if err != nil {
+			continue
+		}
+		for _, fault := range faults {
+			injected = true
+			con.step("%-12s %s", service, fault)
+		}
+	}
+	if !injected {
+		con.note("no faults injected")
+	}
 }
 
-// reset puts the configuration and the backends back to where they started.
-func reset(ctx context.Context, con *console, env *environment, flow *traffic, baseline []byte) {
+// reset puts the configuration, the backends and their faults back to where
+// they started.
+func reset(ctx context.Context, con *console, env *environment, flow *traffic, book *faultBook, baseline []byte) {
 	flow.halt()
 	con.heading("Resetting")
 
-	if err := env.restore(ctx, con, baseline, mustStatus(ctx, env)); err != nil {
+	current := mustStatus(ctx, env)
+	if err := env.restore(ctx, con, baseline, current); err != nil {
 		con.fail("%v", err)
 		return
 	}
-	con.ok("configuration restored and every backend started")
+	env.clearFaults(ctx, con, env.services(current))
+	book.clear()
+	con.ok("configuration restored, every backend started and every fault cleared")
 }
 
 // leave offers to undo whatever the demo changed before the console exits.
-func leave(ctx context.Context, con *console, env *environment, flow *traffic, baseline []byte) error {
+func leave(ctx context.Context, con *console, env *environment, flow *traffic, book *faultBook, baseline []byte) error {
 	flow.halt()
+
+	// A fault left running would spoil the next measurement until it expires.
+	if book.any() {
+		env.clearFaults(ctx, con, env.services(mustStatus(ctx, env)))
+		book.clear()
+	}
 
 	// The configuration is restored without asking: leaving the repository with
 	// demo settings in it is worse than an extra few seconds on the way out.

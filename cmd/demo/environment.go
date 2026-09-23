@@ -30,6 +30,9 @@ type environment struct {
 	trafficURL  string
 	statusURL   string
 	service     string
+	// adminPort is backend-1's admin port on this machine; backend-N's is
+	// adminPort+N-1.
+	adminPort int
 
 	client *http.Client
 }
