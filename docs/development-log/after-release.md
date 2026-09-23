@@ -602,17 +602,13 @@ same figure.
 
 ### Verification
 
+The results themselves are in [the performance report](../performance-report.md#measurements-against-the-profiled-backends);
+what is checked here is the method that produced them.
+
 | Check | Result |
 | --- | --- |
-| Round robin's distribution, every level, three runs each | 10.0% per backend, to three digits |
-| Weighted round robin's share to the slow backend | 3.0% at every level: its capacity-proportional weight |
-| Least connections' share to the slow backend, up to 600 connections | 2.6–3.1%, with no weights configured |
-| Below the pool's capacity | 41% more answered requests at 50 connections, 72% at 100, with no refusals against round robin's 3.6% |
-| At the knee, 300 connections | the three within 8% on throughput; round robin refuses 7.6% and doubles the p99, 334 ms against 177 ms |
-| Least connections at 2,000 connections | 10.1% to the slow backend and 6.0% refused: an instant 503 leaves nothing in flight, so a full backend looks idle |
-| The balancer's own counters across all 54 matrix runs | unmoved: every 503 came from a backend, and none was retried |
-| Balancer CPU against the whole pool's, at 300 connections | 138% against 137% for all ten backends together |
-| The client's p95 at 2,000 connections against the balancer's own | 2.9 s against 241 ms: the wait is in the backlog, not in the balancer |
-| A backend drained or crashed under 600 connections of load | 6 to 28 retries out of about 90,000 requests, and no client-visible error under either weighted round robin or least connections |
+| Every cell run three times, the algorithms interleaved and their order rotated | 54 matrix runs and 18 failure runs |
 | Drift across the campaign | the median cell at 99.8% and 99.2% of its first run |
-| `cmd/loadgen` unit tests | percentiles, aggregation, failure classification, metric parsing, the histogram, per-backend timings, the warmup boundary and an unreachable target; 76.8% of statements |
+| The balancer's own counters across the matrix | unmoved in all 54 runs: every 503 came from a backend |
+| Counters and CPU samples taken inside the measured window | the generator scrapes `/metrics` at both ends; `docker stats` starts after the warmup |
+| `cmd/loadgen` unit tests | percentiles, aggregation, failure classification, metric parsing, the histogram, per-backend timings, the warmup boundary and an unreachable target |
