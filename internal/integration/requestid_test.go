@@ -6,17 +6,14 @@ import (
 	"testing"
 )
 
-// requestIDOf sends one request, optionally carrying sent as its identifier,
-// and returns the identifier the balancer answered with.
-func (b *balancerUnderTest) requestIDOf(t *testing.T, sent string) string {
+// requestIDOf sends one request and returns the identifier the balancer
+// answered with.
+func (b *balancerUnderTest) requestIDOf(t *testing.T) string {
 	t.Helper()
 
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, b.url, nil)
 	if err != nil {
 		t.Fatalf("building the request failed: %v", err)
-	}
-	if sent != "" {
-		request.Header.Set("X-Request-Id", sent)
 	}
 
 	response, err := http.DefaultClient.Do(request)
@@ -29,25 +26,18 @@ func (b *balancerUnderTest) requestIDOf(t *testing.T, sent string) string {
 	return response.Header.Get("X-Request-Id")
 }
 
+// A client's own identifier, and one that is unusable, are covered against the
+// proxy's handler chain in internal/proxy; this checks the assembled balancer.
 func TestEveryAnswerCarriesARequestID(t *testing.T) {
 	under := start(t, testConfig(newBackends(t, 2)))
 
-	first := under.requestIDOf(t, "")
-	second := under.requestIDOf(t, "")
+	first := under.requestIDOf(t)
+	second := under.requestIDOf(t)
 
 	if first == "" || second == "" {
 		t.Fatalf("identifiers were %q and %q, want one on every answer", first, second)
 	}
 	if first == second {
 		t.Errorf("both answers carried %q, want an identifier per request", first)
-	}
-}
-
-func TestAClientsRequestIDComesBack(t *testing.T) {
-	under := start(t, testConfig(newBackends(t, 2)))
-
-	const sent = "order-7"
-	if got := under.requestIDOf(t, sent); got != sent {
-		t.Errorf("the answer carried %q, want the client's own %q", got, sent)
 	}
 }
