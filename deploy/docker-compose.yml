@@ -14,10 +14,17 @@ x-mock: &mock
   image: ege-balancer-mock
   mem_limit: 32m
 
+# Each backend also serves an admin port, 5679, through which the demo console
+# injects faults while it runs. It is published on the loopback interface only,
+# at 5781 to 5790, and the balancer never forwards to it.
+x-admin: &admin
+  MOCK_ADMIN: ":5679"
+
 # Latency is the median and the 99th percentile of the time a request takes
 # once a worker has picked it up; waiting in the queue comes on top of it.
 # Beyond the queue a backend answers 503 at once, as an overloaded server would.
 x-fast: &fast
+  <<: *admin
   MOCK_LATENCY: 15ms
   MOCK_LATENCY_P99: 80ms
   MOCK_CAPACITY: "64"
@@ -25,6 +32,7 @@ x-fast: &fast
   MOCK_BODY_SIZE: 4KiB
 
 x-medium: &medium
+  <<: *admin
   MOCK_LATENCY: 30ms
   MOCK_LATENCY_P99: 200ms
   MOCK_CAPACITY: "32"
@@ -32,6 +40,7 @@ x-medium: &medium
   MOCK_BODY_SIZE: 4KiB
 
 x-slow: &slow
+  <<: *admin
   MOCK_LATENCY: 80ms
   MOCK_LATENCY_P99: 500ms
   MOCK_CAPACITY: "16"
@@ -39,6 +48,7 @@ x-slow: &slow
   MOCK_BODY_SIZE: 4KiB
 
 x-large: &large
+  <<: *admin
   MOCK_LATENCY: 15ms
   MOCK_LATENCY_P99: 80ms
   MOCK_CAPACITY: "64"
@@ -49,52 +59,52 @@ services:
   backend-1:
     <<: *mock
     environment: { <<: *fast, MOCK_NAME: backend-1 }
-    ports: ["5681:5678"]
+    ports: ["5681:5678", "127.0.0.1:5781:5679"]
 
   backend-2:
     <<: *mock
     environment: { <<: *fast, MOCK_NAME: backend-2 }
-    ports: ["5682:5678"]
+    ports: ["5682:5678", "127.0.0.1:5782:5679"]
 
   backend-3:
     <<: *mock
     environment: { <<: *fast, MOCK_NAME: backend-3 }
-    ports: ["5683:5678"]
+    ports: ["5683:5678", "127.0.0.1:5783:5679"]
 
   backend-4:
     <<: *mock
     environment: { <<: *fast, MOCK_NAME: backend-4 }
-    ports: ["5684:5678"]
+    ports: ["5684:5678", "127.0.0.1:5784:5679"]
 
   backend-5:
     <<: *mock
     environment: { <<: *fast, MOCK_NAME: backend-5 }
-    ports: ["5685:5678"]
+    ports: ["5685:5678", "127.0.0.1:5785:5679"]
 
   backend-6:
     <<: *mock
     environment: { <<: *fast, MOCK_NAME: backend-6 }
-    ports: ["5686:5678"]
+    ports: ["5686:5678", "127.0.0.1:5786:5679"]
 
   backend-7:
     <<: *mock
     environment: { <<: *medium, MOCK_NAME: backend-7 }
-    ports: ["5687:5678"]
+    ports: ["5687:5678", "127.0.0.1:5787:5679"]
 
   backend-8:
     <<: *mock
     environment: { <<: *medium, MOCK_NAME: backend-8 }
-    ports: ["5688:5678"]
+    ports: ["5688:5678", "127.0.0.1:5788:5679"]
 
   backend-9:
     <<: *mock
     environment: { <<: *slow, MOCK_NAME: backend-9 }
-    ports: ["5689:5678"]
+    ports: ["5689:5678", "127.0.0.1:5789:5679"]
 
   backend-10:
     <<: *mock
     environment: { <<: *large, MOCK_NAME: backend-10 }
-    ports: ["5690:5678"]
+    ports: ["5690:5678", "127.0.0.1:5790:5679"]
 
   loadbalancer:
     build:
