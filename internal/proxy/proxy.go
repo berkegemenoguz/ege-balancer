@@ -23,8 +23,12 @@ import (
 	"github.com/berkegemenoguz/ege-balancer/internal/observability"
 )
 
-// backendKey addresses the backend chosen for a request inside its context.
-type backendKey struct{}
+// backendKey addresses the backend chosen for a request inside its context,
+// and attemptKey the attempt being made with it.
+type (
+	backendKey struct{}
+	attemptKey struct{}
+)
 
 // errRetryable5xx turns a 5xx answer into a failed attempt, so that the retry
 // loop moves on to the next backend. It never reaches the client.
@@ -149,6 +153,11 @@ func (c *Core) newReverseProxy(cfg *config.Config, backendCount int) *httputil.R
 			if c.current.Load().retryOn5xx && response.StatusCode >= http.StatusInternalServerError {
 				return errRetryable5xx
 			}
+			if response.Request != nil {
+				if current := attemptFrom(response.Request.Context()); current != nil {
+					response.Body = &watchedBody{ReadCloser: response.Body, attempt: current}
+				}
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -198,10 +207,7 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.metrics.ObserveRetry()
 		}
 
-		served, attemptErr := c.serve(w, r, active, backend, body)
-		if retry {
-			active.budget.retryFinished()
-		}
+		served, attemptErr := c.try(w, r, active, backend, body, retry)
 		if served {
 			return
 		}
@@ -224,6 +230,18 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	unavailable(w)
 }
 
+// try makes one attempt and gives back the retry budget it held. The release is
+// deferred because an answer that fails part way through makes the forwarder
+// abort by panicking, and a release written after the call would be skipped:
+// each such retry would then hold its share of the budget for good, until
+// enough had leaked to refuse every retry until the next reload.
+func (c *Core) try(w http.ResponseWriter, r *http.Request, active *settings, backend *balancer.Backend, body []byte, retry bool) (bool, error) {
+	if retry {
+		defer active.budget.retryFinished()
+	}
+	return c.serve(w, r, active, backend, body)
+}
+
 // serve makes one attempt and reports whether the client was answered, and the
 // error that failed the attempt if it was not.
 func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, backend *balancer.Backend, body []byte) (bool, error) {
@@ -237,27 +255,54 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, b
 	}
 
 	current := &attempt{ResponseWriter: w, status: http.StatusOK}
+	ctx := context.WithValue(r.Context(), backendKey{}, backend)
+	ctx = context.WithValue(ctx, attemptKey{}, current)
+
+	// An answer the backend breaks off after it has started cannot become an
+	// error for the retry loop: the forwarder aborts the client's connection
+	// instead, by panicking, and the panic has to carry on so the client is not
+	// left holding half an answer. It is still the backend's failure, and is
+	// counted as one on the way through. A client that hangs up is not: its own
+	// context is done, and the backend is not blamed for it.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if current.aborted != nil && r.Context().Err() == nil {
+				c.failed(r, active, backend, current.aborted)
+			}
+			panic(recovered)
+		}
+	}()
+
 	started := time.Now()
-	c.forward.ServeHTTP(current, r.WithContext(context.WithValue(r.Context(), backendKey{}, backend)))
+	c.forward.ServeHTTP(current, r.WithContext(ctx))
 	took := time.Since(started)
 
 	if current.err == nil {
-		c.checker.ReportSuccess(backend.Addr)
-		active.breaker.recordSuccess(backend.Addr)
-		c.metrics.ObserveRequest(backend.Addr, strconv.Itoa(current.status), took)
-		slog.Debug("request served", "method", r.Method, "path", r.URL.Path,
-			"backend", backend.Addr, "status", current.status, "duration", took,
-			"request_id", requestIDFrom(r.Context()))
+		c.succeeded(r, active, backend, current.status, took)
 		return true, nil
 	}
+	c.failed(r, active, backend, current.err)
+	return false, current.err
+}
 
+// succeeded records an attempt the backend served.
+func (c *Core) succeeded(r *http.Request, active *settings, backend *balancer.Backend, status int, took time.Duration) {
+	c.checker.ReportSuccess(backend.Addr)
+	active.breaker.recordSuccess(backend.Addr)
+	c.metrics.ObserveRequest(backend.Addr, strconv.Itoa(status), took)
+	slog.Debug("request served", "method", r.Method, "path", r.URL.Path,
+		"backend", backend.Addr, "status", status, "duration", took,
+		"request_id", requestIDFrom(r.Context()))
+}
+
+// failed records an attempt the backend did not serve, against the backend.
+func (c *Core) failed(r *http.Request, active *settings, backend *balancer.Backend, err error) {
 	c.checker.ReportFailure(backend.Addr)
 	active.breaker.recordFailure(backend.Addr)
 	c.metrics.ObserveBackendFailure(backend.Addr)
 	slog.Warn("backend attempt failed", "method", r.Method, "path", r.URL.Path,
-		"backend", backend.Addr, "error", current.err,
+		"backend", backend.Addr, "error", err,
 		"request_id", requestIDFrom(r.Context()))
-	return false, current.err
 }
 
 // available returns the backends that may serve the request now: healthy, not
@@ -320,6 +365,9 @@ type attempt struct {
 	http.ResponseWriter
 	err    error
 	status int
+	// aborted is the error of a backend that broke off an answer already on
+	// its way to the client.
+	aborted error
 }
 
 // WriteHeader records the status on its way to the client.
@@ -332,6 +380,30 @@ func (a *attempt) WriteHeader(status int) {
 // still reach the flushing and deadline support of the real connection.
 func (a *attempt) Unwrap() http.ResponseWriter {
 	return a.ResponseWriter
+}
+
+// attemptFrom returns the attempt a request is being forwarded in, if any.
+func attemptFrom(ctx context.Context) *attempt {
+	current, _ := ctx.Value(attemptKey{}).(*attempt)
+	return current
+}
+
+// watchedBody notices a backend failing part way through its answer. The read
+// that fails happens inside the forwarder, which then aborts rather than
+// returning, so the attempt is marked here where the failure is seen.
+type watchedBody struct {
+	io.ReadCloser
+	attempt *attempt
+}
+
+// Read passes the backend's answer through and marks the attempt aborted on
+// any error other than the end of the answer.
+func (b *watchedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		b.attempt.aborted = err
+	}
+	return n, err
 }
 
 // backendFrom returns the backend the request was routed to.
