@@ -34,17 +34,17 @@ type faultKind struct {
 // faultKinds are the misbehaviours offered, in menu order.
 var faultKinds = []faultKind{
 	{"hang", "hang without answering", "rate", "hanging",
-		"the balancer abandons each hung request after response_timeout (3s in the example configuration) and retries a GET elsewhere; a POST is refused as not_retryable, since the backend may have carried it out"},
+		"the balancer abandons each hung request after response_timeout (3s in the example configuration), counts it as a timeout and retries a GET elsewhere; a POST is refused as not_retryable, since the backend may have carried it out"},
 	{"slow", "answer several times slower", "factor", "slow",
 		"least connections moves traffic away from it; round robin keeps sending its share"},
 	{"error", "answer 500", "rate", "failing",
-		"the 500s reach the client unless retry_on_5xx is set; the Resilience dashboard shows them"},
+		"the 500s reach the client unless retry_on_5xx is set, which counts them as failures of the backend and retries them"},
 	{"reset", "drop the connection half way through the answer", "rate", "dropping",
-		"nothing can retry an answer already on its way: the client sees its connection close, and the balancer counts the failure against the backend"},
+		"nothing can retry an answer already on its way: the client sees its connection close, and the balancer counts the failure against the backend as cut_off"},
 	{"drip", "drip the answer out over two seconds", "rate", "dripping",
-		"answers arrive whole but late; watch p99 on the Overview dashboard"},
+		"answers arrive whole but late, and nothing counts as a failure; watch p99"},
 	{"freeze", "freeze entirely, health check included", "", "frozen",
-		"its health checks time out as well, so it leaves the pool after three failed checks"},
+		"its requests time out and its health checks too, so it leaves the pool after three failed checks"},
 }
 
 // adminURL is the admin port of a mock backend on this machine. The compose

@@ -110,6 +110,7 @@ func welcome(con *console, env *environment, current status) {
 	con.step("grafana      http://localhost:3000/d/ege-balancer            overview")
 	con.step("             http://localhost:3000/d/ege-balancer-backends   backends")
 	con.step("             http://localhost:3000/d/ege-balancer-resilience resilience")
+	con.step("             http://localhost:3000/d/ege-balancer-faults     faults")
 	con.step("prometheus   http://localhost:9090")
 	con.blank()
 	con.step("now: %s · %d/%d backends healthy · %d reloads applied",
@@ -197,6 +198,7 @@ func misbehave(ctx context.Context, con *console, env *environment, book *faultB
 	book.add(service, kind.doing, lasts)
 	con.ok("%s is %s for %s", service, kind.doing, lasts)
 	con.note("%s", kind.expect)
+	con.note("the Faults dashboard follows it from the backend to the client: http://localhost:3000/d/ege-balancer-faults")
 }
 
 // pick reads a menu choice numbered from one, and returns its index.
