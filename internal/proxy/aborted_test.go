@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,4 +126,70 @@ func TestAClientThatHangsUpIsNotCountedAgainstTheBackend(t *testing.T) {
 	if _, failures := checker.reported(); len(failures) != 0 {
 		t.Errorf("the health checker heard of failures %v, want none: the client left, the backend did nothing wrong", failures)
 	}
+}
+
+func TestAClientThatLeavesBeforeTheAnswerIsNotCountedAgainstAnyBackend(t *testing.T) {
+	// Each backend takes longer to answer than the client is willing to wait.
+	var received atomic.Int64
+	backends := make([]*balancer.Backend, 0, 3)
+	for range 3 {
+		server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			received.Add(1)
+			select {
+			case <-r.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+		}))
+		t.Cleanup(server.Close)
+		backends = append(backends, &balancer.Backend{Addr: strings.TrimPrefix(server.URL, "http://")})
+	}
+
+	checker := newFakeChecker()
+	metrics := observability.NewMetrics()
+	front := httptest.NewServer(New(retryingConfig(), balancer.NewRoundRobin(), backends, checker, metrics))
+	defer front.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, front.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response, err := http.DefaultClient.Do(request); err == nil {
+		_ = response.Body.Close()
+		t.Fatal("the client was answered, want it to give up first")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for busy(backends) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if busy(backends) {
+		t.Fatal("the balancer never finished the request")
+	}
+
+	if n := received.Load(); n != 1 {
+		t.Errorf("%d backends were offered the request, want 1: a retry for a client that has left reaches no one", n)
+	}
+	if _, failures := checker.reported(); len(failures) != 0 {
+		t.Errorf("the health checker heard of failures %v, want none: the client left, no backend did anything wrong", failures)
+	}
+
+	recorder := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for _, counted := range []string{"lb_backend_failures_total{", "lb_rejected_requests_total{"} {
+		if strings.Contains(recorder.Body.String(), counted) {
+			t.Errorf("metrics count %s, want nothing: the client left", strings.TrimSuffix(counted, "{"))
+		}
+	}
+}
+
+// busy reports whether any backend still has a request in flight.
+func busy(backends []*balancer.Backend) bool {
+	for _, backend := range backends {
+		if backend.ActiveConnections() > 0 {
+			return true
+		}
+	}
+	return false
 }

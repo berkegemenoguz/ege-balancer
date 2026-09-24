@@ -212,6 +212,15 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Nobody is left to answer: a retry or an error page would reach no
+		// one, and every further attempt would fail at once on the request's
+		// cancelled context.
+		if r.Context().Err() != nil {
+			slog.Debug("the client went away before it was answered", "method", r.Method, "path", r.URL.Path,
+				"backend", backend.Addr, "request_id", requestIDFrom(r.Context()))
+			return
+		}
+
 		// Another attempt would be made, but the request may already have been
 		// carried out by the backend that just failed.
 		if n+1 < active.attempts && !retryable(r.Method, attemptErr) {
@@ -281,7 +290,12 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, b
 		c.succeeded(r, active, backend, current.status, took)
 		return true, nil
 	}
-	c.failed(r, active, backend, current.err)
+	// A client that hangs up before the answer begins ends the attempt with its
+	// own cancelled context. That is no more the backend's failure than a hang
+	// up part way through the answer is.
+	if r.Context().Err() == nil {
+		c.failed(r, active, backend, current.err)
+	}
 	return false, current.err
 }
 
