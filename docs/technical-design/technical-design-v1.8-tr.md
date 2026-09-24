@@ -7,7 +7,7 @@
 | Yazar | Berk Egemen Oğuz |
 | Tarih | 11 Eylül 2026 |
 | Sürüm | 1.8 — v1.6'nın ve v1.7 revizyon notlarının yerini alır |
-| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2) profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8) ve gerçekçi mock backend'lerin ortaya çıkarıp v1.3.1'de düzeltilen üç hata (§11.1) |
+| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2), profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8), gerçekçi mock backend'lerin ortaya çıkarıp v1.3.1'de düzeltilen üç hata ve v1.3.2'de düzeltilen, vazgeçen istemcilerin backend'lerin hanesine yazılması (§11.1) |
 | Kod | `github.com/berkegemenoguz/ege-balancer` |
 | Dil | Türkçe. Aynı içerikteki İngilizce sürüm: [technical-design-v1.8-en.md](technical-design-v1.8-en.md) |
 
@@ -423,6 +423,14 @@ istemcinin bağlantısını keser ve o noktada, metot ne olursa olsun, hiçbir �
 Deneme yine de backend'in hanesine yazılır — sağlık kontrolünde, circuit breaker'da ve
 `lb_backend_failures_total`'da — meğer ki istemcinin kendisi gitmiş olsun; bu backend'in hatası
 değildir. v1.3.1'den önce böyle bir deneme hiç sayılmıyordu (§11.1).
+
+Hiçbir yanıt gelmeden vazgeçen bir istemci de denemeyi bitirir; kendi isteği iptal edilmiş olur. Bu
+da backend'in hatası değildir ve backend'in hanesine hiçbir şey yazılmaz; istek başka bir backend'e
+de sunulmaz, çünkü yanıtlanacak kimse kalmamıştır. Bu yüzden takılan bir backend, istemci hâlâ
+beklerken yanıt zaman aşımı dolduğunda başarısız sayılır; bu, o zaman aşımını kısa tutmak için bir
+neden daha. v1.3.2'den önce iptal edilen deneme backend'in hanesine yazılıyor ve istek retry
+ediliyordu; her retry iptal edilmiş istek yüzünden anında başarısız oluyor ve kendi backend'inin
+hanesine yazılıyordu (§11.1).
 
 ### 6.4 Devre kesici
 
@@ -964,6 +972,21 @@ yapmıyordu:
 
 Her düzeltmenin, düzeltme geri alındığında başarısız olan bir testi var. İlk ikisi v1.1.0 ve
 v1.0.0'dan beri koddaydı; gerçekçi olanlardan önceki hiçbir backend onları gösteremezdi.
+
+v1.3.2'de düzeltilen dördüncü bir hata, başarısız denemeleri nedenlerine göre ayırmak için yük
+dengeleyicinin bir backend'in hanesine yazdığı hatalar listelenirken ortaya çıktı: bunlardan biri
+istemcinin kendi iptal ettiği istekti. Yanıtı başlamadan vazgeçen bir istemci, beklediği backend'in
+hatası olarak sayılıyor ve istek retry ediliyordu; her retry iptal edilmiş istek yüzünden anında
+başarısız oluyor ve o da kendi backend'inin hanesine yazılıyordu. Round robin ile birlikte bu, takılan
+tek bir backend'i bir kesintiye çeviriyordu. Üç backend'le yapılan canlı bir karşılaştırmada —
+biri her isteği takıp bekletirken ve her istemci bir saniye sonra vazgeçerken — 15 isteğin 14'ü
+yanıtsız kaldı ve üç backend'in üçü de sağlıksız işaretlendi: her istek round robin'i deneme başına
+bir olmak üzere üç yer ilerletiyordu, bu yüzden her istek yine takılan backend'den başlıyordu.
+Düzeltilmiş yük dengeleyici yalnızca takılan backend'e giden beş isteği kaybetti ve üçünü de havuzda
+tuttu. Gitmiş bir istemci artık ne bir backend'in hanesine yazılıyor ne de retry ediliyor. Yük
+üreteci aynı davranışla §10.8'deki kampanyada karşılaşmış ve işçilerini düzgünce durduracak biçimde
+değiştirilmişti; yük dengeleyici ise olduğu gibi bırakılmıştı. Araçtaki bir geçici çözüm üründeki bir
+hatayı gizlemişti.
 
 ### 11.2 Tasarımın yanıldığı yerler ve bunun faydası
 

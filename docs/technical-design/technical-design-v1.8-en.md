@@ -7,7 +7,7 @@
 | Author | Berk Egemen Oğuz |
 | Date | 11 September 2026 |
 | Version | 1.8 — supersedes v1.6 and the v1.7 revision notes |
-| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), the second measurement campaign against the profiled backends (§10.8), and the three defects the realistic mock backends exposed, fixed in v1.3.1 (§11.1) |
+| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), the second measurement campaign against the profiled backends (§10.8), the three defects the realistic mock backends exposed, fixed in v1.3.1, and clients that give up being counted against the backends, fixed in v1.3.2 (§11.1) |
 | Code | `github.com/berkegemenoguz/ege-balancer` |
 | Language | English. A Turkish edition with the same content is [technical-design-v1.8-tr.md](technical-design-v1.8-tr.md) |
 
@@ -421,6 +421,14 @@ it aborts the client's connection instead, and nothing can be retried at that po
 method. The attempt still counts against the backend — with the health checker, the circuit breaker
 and `lb_backend_failures_total` — unless the client itself went away, which is not the backend's
 failure. Before v1.3.1 such an attempt was not counted at all (§11.1).
+
+A client that gives up before any answer arrives ends the attempt as well, with its own request
+cancelled. That is not the backend's failure either, and nothing is counted against it; nor is the
+request offered to another backend, since there is no one left to answer. A backend that hangs is
+therefore counted as failing when the response timeout expires while the client still waits, which
+is one more reason to keep that timeout short. Before v1.3.2 the cancelled attempt was counted
+against the backend and the request retried, and each retry failed at once on the cancelled request
+and was counted against its own backend (§11.1).
 
 ### 6.4 Circuit breaker
 
@@ -955,6 +963,20 @@ backends never did:
 
 Each fix has a test that fails with the fix reverted. The first two had been in the code since
 v1.1.0 and v1.0.0; no backend before the realistic ones could have shown them.
+
+A fourth defect, fixed in v1.3.2, turned up while listing the errors the balancer counts against a
+backend, in order to break its failures down by reason: one of them was the client's own cancelled
+request. A client that gave up before its answer began was counted as a failure of the
+backend it had been waiting on, and the request was retried; each retry failed at once on the
+cancelled request and was counted against its backend too. Together with round robin this turned
+one hanging backend into an outage. In a live comparison on three backends, one of them hanging
+every request and each client giving up after a second, 14 of 15 requests went unanswered and all
+three backends were marked unhealthy: every request moved round robin on by three places, one per
+attempt, so every request began at the hanging backend again. The fixed balancer lost only the five
+requests sent to the hanging backend and kept all three in the pool. A client that has gone is now
+neither counted against a backend nor retried. The load generator had met this behaviour in the
+campaign of §10.8 and was changed to stop its workers cleanly; the balancer was left as it was. A
+workaround in the tool had hidden a defect in the product.
 
 ### 11.2 Where the design was wrong, and why that was useful
 
