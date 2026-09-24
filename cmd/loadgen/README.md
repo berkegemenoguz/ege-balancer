@@ -43,10 +43,11 @@ distribution at one level.
 - **A warmup, discarded.** Connections are still being opened in the first seconds, and the
   balancer's upstream pools are still filling. `-warmup` defaults to five seconds.
 - **A clean stop.** When the time is up, workers finish the request they are on rather than being
-  cut off. A cancelled request fails every attempt inside the balancer and is counted there as a
-  refusal the load never caused. Throughput is divided by the measured window itself, not by the
-  time the last request took to finish: a request hanging for seconds would otherwise stretch the
-  window and understate every figure.
+  cut off, so every request sent is also measured. Balancers before v1.3.2 also counted a cancelled
+  request as a failed attempt at every backend it was offered to, and as a refusal the load never
+  caused. Throughput is divided by the measured window itself, not by the time the last request
+  took to finish: a request hanging for seconds would otherwise stretch the window and understate
+  every figure.
 - **What the client could not otherwise see.** An answer that begins and does not finish is a
   failure, "answer cut off", whatever its status said. And Go's client sends an idempotent request
   again, on a new connection, when the one it reused closes before any answer arrives; the balancer

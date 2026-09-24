@@ -98,8 +98,9 @@ func main() {
 // opened then, and the balancer's own pools are still filling.
 //
 // Workers are asked to stop rather than cut off, so the run ends with no
-// request in flight. A cancelled request would otherwise fail every attempt at
-// the balancer and be counted there as a refusal the load never caused.
+// request in flight and every request sent is also measured. Balancers before
+// v1.3.2 also counted a cancelled request as a failed attempt at every backend
+// it was offered to, and as a refusal the load never caused.
 func run(shape load, metricsURL string, connections int, warmup, duration, timeout time.Duration) result {
 	client := &http.Client{
 		Timeout:   timeout,
