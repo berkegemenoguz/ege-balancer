@@ -65,7 +65,9 @@ it to the backend's admin port, published on this machine at 5781 for `backend-1
 `backend-10`. Nothing is changed on disk: every fault ends on its own after the time it was given,
 at most ten minutes. Until then the prompt names it, `7` lists what every backend reports in force,
 `r` clears the faults of every backend, and quitting clears the ones the console started, so that
-one left running cannot spoil the next measurement.
+one left running cannot spoil the next measurement. The
+[Faults dashboard](http://localhost:3000/d/ege-balancer-faults) follows each one from the backend to
+the client, and every dashboard shades the time it was in force.
 
 If something is interrupted before the console can tidy up, one command puts the configuration
 back:

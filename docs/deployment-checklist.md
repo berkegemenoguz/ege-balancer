@@ -62,7 +62,7 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
       `/readyz`: backends going down must not restart the balancer
 - [ ] Whatever routes traffic to the balancer stops on a failing `/readyz`, so a shutdown drains
       instead of cutting requests off
-- [ ] Prometheus is scraping the balancer and the three Grafana dashboards show data
+- [ ] Prometheus is scraping the balancer and the Grafana dashboards show data
 
 ## After deploying
 
