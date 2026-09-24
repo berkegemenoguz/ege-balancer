@@ -7,12 +7,13 @@ backends leave the pool on their own and come back when they recover, failures a
 policy you choose, and the whole system can be watched through structured logs, Prometheus metrics
 and Grafana dashboards.
 
-> Status: v1.3.1. The twelve day plan was released as v1.0.0, and the releases since have added a
+> Status: v1.3.2. The twelve day plan was released as v1.0.0, and the releases since have added a
 > retry budget and least connections by the power of two choices (v1.1.0); liveness and readiness
 > endpoints, a container health check, profiled mock backends and three Grafana dashboards
 > (v1.2.0); a retry rule for requests that are not idempotent, with an identifier on every request
-> (v1.3.0); and fixes for three defects that realistic mock backends exposed (v1.3.1). Everything
-> below is implemented and tested, except where *Out of scope* says otherwise.
+> (v1.3.0); fixes for three defects that realistic mock backends exposed (v1.3.1); and a fix for
+> clients that give up being counted against the backends (v1.3.2). Everything below is implemented
+> and tested, except where *Out of scope* says otherwise.
 
 ## Contents
 
@@ -301,12 +302,15 @@ Once the request is on the wire the backend may have carried it out and answered
 that then broke, so sending it again could place a second order; the client receives 503 instead,
 counted as `not_retryable`. Idempotent requests are retried after any failure. A failure after the
 answer has started cannot be retried at all, whatever the method: the client's connection is closed,
-and the failure is counted against the backend.
+and the failure is counted against the backend. A client that gives up before it is answered is not
+counted against any backend, and its request is not retried: there is no one left to answer.
 
 `timeouts.response_timeout` must be shorter than `timeouts.write_timeout`: once a stalled backend is
 abandoned, what is left of the write timeout is the time there is to answer the client from another.
 The shipped configurations use 3 s and 10 s, and the balancer logs a warning, at start and on every
-reload, for a configuration that does not keep that order.
+reload, for a configuration that does not keep that order. It should also be shorter than clients
+wait: a backend that hangs is counted as failing when its response timeout expires, and a client that
+has already given up leaves nothing to count.
 
 The numbers in both files are starting points; the [performance report](docs/performance-report.md)
 records what the load test says about them.
