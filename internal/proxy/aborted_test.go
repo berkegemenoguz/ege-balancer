@@ -84,7 +84,7 @@ func TestABackendThatBreaksOffItsAnswerIsCountedAgainstIt(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if want := `lb_backend_failures_total{backend="` + backend.Addr + `"} 1`; !strings.Contains(recorder.Body.String(), want) {
+	if want := `lb_backend_failures_total{backend="` + backend.Addr + `",reason="cut_off"} 1`; !strings.Contains(recorder.Body.String(), want) {
 		t.Errorf("metrics do not contain %q", want)
 	}
 }
@@ -177,10 +177,12 @@ func TestAClientThatLeavesBeforeTheAnswerIsNotCountedAgainstAnyBackend(t *testin
 
 	recorder := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	for _, counted := range []string{"lb_backend_failures_total{", "lb_rejected_requests_total{"} {
-		if strings.Contains(recorder.Body.String(), counted) {
-			t.Errorf("metrics count %s, want nothing: the client left", strings.TrimSuffix(counted, "{"))
-		}
+	body := recorder.Body.String()
+	if counted := countedFailures(body); counted != "" {
+		t.Errorf("failures counted, want none: the client left\n%s", counted)
+	}
+	if strings.Contains(body, "lb_rejected_requests_total{") {
+		t.Error("a refusal was counted, want none: the client left")
 	}
 }
 

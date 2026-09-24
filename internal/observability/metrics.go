@@ -40,8 +40,8 @@ func NewMetrics() *Metrics {
 		}, []string{"backend"}),
 		failures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "lb_backend_failures_total",
-			Help: "Attempts a backend could not serve, by backend.",
-		}, []string{"backend"}),
+			Help: "Attempts a backend could not serve, by backend and reason.",
+		}, []string{"backend", "reason"}),
 		retries: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "lb_retries_total",
 			Help: "Retries sent after a failed attempt. Retries the budget refused are counted as rejections.",
@@ -66,9 +66,21 @@ func (m *Metrics) ObserveRequest(backend, status string, took time.Duration) {
 	m.duration.WithLabelValues(backend).Observe(took.Seconds())
 }
 
-// ObserveBackendFailure records an attempt that a backend could not serve.
-func (m *Metrics) ObserveBackendFailure(backend string) {
-	m.failures.WithLabelValues(backend).Inc()
+// ObserveBackendFailure records an attempt that a backend could not serve, and
+// why: connect, timeout, reset, cut_off, 5xx or other.
+func (m *Metrics) ObserveBackendFailure(backend, reason string) {
+	m.failures.WithLabelValues(backend, reason).Inc()
+}
+
+// PrepareBackendFailures creates a backend's failure counters at zero, one for
+// each reason. A series that first appears when its first failure does starts
+// at that count, and rate() cannot see the jump from nothing: a backend that
+// went down once, and was taken out of the pool after three failed attempts,
+// would show no failures at all.
+func (m *Metrics) PrepareBackendFailures(backend string, reasons ...string) {
+	for _, reason := range reasons {
+		m.failures.WithLabelValues(backend, reason)
+	}
 }
 
 // ObserveRetry records a retry the retry budget allowed.

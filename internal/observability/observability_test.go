@@ -53,16 +53,31 @@ func TestMetricsReportServedRequests(t *testing.T) {
 	}
 }
 
+func TestPreparedFailureCountersStartAtZero(t *testing.T) {
+	metrics := NewMetrics()
+	metrics.PrepareBackendFailures("backend-1:5678", "connect", "timeout")
+
+	body := scrape(t, metrics.Handler())
+	for _, want := range []string{
+		`lb_backend_failures_total{backend="backend-1:5678",reason="connect"} 0`,
+		`lb_backend_failures_total{backend="backend-1:5678",reason="timeout"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics do not contain %q", want)
+		}
+	}
+}
+
 func TestMetricsReportFailuresAndRejections(t *testing.T) {
 	metrics := NewMetrics()
-	metrics.ObserveBackendFailure("backend-1:5678")
+	metrics.ObserveBackendFailure("backend-1:5678", "timeout")
 	metrics.ObserveRetry()
 	metrics.ObserveRejection("rate_limited")
 	metrics.ObserveRejection("rate_limited")
 
 	body := scrape(t, metrics.Handler())
 	for _, want := range []string{
-		`lb_backend_failures_total{backend="backend-1:5678"} 1`,
+		`lb_backend_failures_total{backend="backend-1:5678",reason="timeout"} 1`,
 		`lb_retries_total 1`,
 		`lb_rejected_requests_total{reason="rate_limited"} 2`,
 	} {

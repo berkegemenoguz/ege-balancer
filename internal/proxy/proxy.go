@@ -71,6 +71,7 @@ func New(
 	core := &Core{checker: checker, metrics: metrics}
 	core.current.Store(settingsFor(cfg, strategy, backends))
 	core.forward = core.newReverseProxy(cfg, len(backends))
+	core.prepareMetrics(backends)
 
 	limiter := newRateLimiter(cfg.Limits.RateLimitPerIP, metrics)
 	return &Handler{
@@ -101,6 +102,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Reload(cfg *config.Config, strategy balancer.LBStrategy, backends []*balancer.Backend) {
 	h.limiter.setRate(cfg.Limits.RateLimitPerIP)
 	h.core.current.Store(settingsFor(cfg, strategy, backends))
+	h.core.prepareMetrics(backends)
+}
+
+// prepareMetrics creates the failure counters of every backend at zero, so
+// that the first failures of a backend, or of a new kind, are not lost to
+// rate().
+func (c *Core) prepareMetrics(backends []*balancer.Backend) {
+	for _, backend := range backends {
+		c.metrics.PrepareBackendFailures(backend.Addr, reasons...)
+	}
 }
 
 // Strategy is the strategy currently in use, so that a reload can keep it when
@@ -276,7 +287,7 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, b
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if current.aborted != nil && r.Context().Err() == nil {
-				c.failed(r, active, backend, current.aborted)
+				c.failed(r, active, backend, current.aborted, reasonCutOff)
 			}
 			panic(recovered)
 		}
@@ -294,7 +305,7 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, b
 	// own cancelled context. That is no more the backend's failure than a hang
 	// up part way through the answer is.
 	if r.Context().Err() == nil {
-		c.failed(r, active, backend, current.err)
+		c.failed(r, active, backend, current.err, failureReason(current.err))
 	}
 	return false, current.err
 }
@@ -310,12 +321,12 @@ func (c *Core) succeeded(r *http.Request, active *settings, backend *balancer.Ba
 }
 
 // failed records an attempt the backend did not serve, against the backend.
-func (c *Core) failed(r *http.Request, active *settings, backend *balancer.Backend, err error) {
+func (c *Core) failed(r *http.Request, active *settings, backend *balancer.Backend, err error, reason string) {
 	c.checker.ReportFailure(backend.Addr)
 	active.breaker.recordFailure(backend.Addr)
-	c.metrics.ObserveBackendFailure(backend.Addr)
+	c.metrics.ObserveBackendFailure(backend.Addr, reason)
 	slog.Warn("backend attempt failed", "method", r.Method, "path", r.URL.Path,
-		"backend", backend.Addr, "error", err,
+		"backend", backend.Addr, "reason", reason, "error", err,
 		"request_id", requestIDFrom(r.Context()))
 }
 
