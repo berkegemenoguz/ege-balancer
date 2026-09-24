@@ -25,17 +25,20 @@ const (
 )
 
 // adminHandler serves the admin port, through which the demo console or a
-// person changes how the backend behaves while it runs. It is a separate
-// server on a separate port for two reasons. The balancer forwards every path
-// on the traffic port, so an endpoint there could be reached by any client of
-// the balancer. And nothing here waits on the fault layer, so it answers while
-// the backend is hanging or frozen — exactly when someone wants to stop it.
+// person changes how the backend behaves while it runs, and Prometheus reads
+// what it has been doing. It is a separate server on a separate port for two
+// reasons. The balancer forwards every path on the traffic port, so an
+// endpoint there could be reached by any client of the balancer. And nothing
+// here waits on the fault layer, so it answers while the backend is hanging or
+// frozen — exactly when someone wants to stop it, and when its metrics matter
+// most.
 func (s *server) adminHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /faults", s.listFaults)
 	mux.HandleFunc("POST /faults", s.injectFault)
 	mux.HandleFunc("DELETE /faults", s.clearFaults)
 	mux.HandleFunc("POST /cache/clear", s.clearCache)
+	mux.HandleFunc("GET /metrics", s.metrics)
 	return mux
 }
 
@@ -85,6 +88,7 @@ func (s *server) injectFault(w http.ResponseWriter, r *http.Request) {
 		s.clock.freeze(lasts)
 	}
 	s.faults.inject(m, ft, lasts)
+	s.counts.injected[m].Add(1)
 	slog.Info("fault injected", "backend", s.profile.name, "mode", m,
 		"rate", ft.rate, "factor", ft.factor, "over", ft.over, "for", lasts)
 	writeState(w, s.state())

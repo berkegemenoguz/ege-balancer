@@ -7,7 +7,7 @@
 // Every setting is a flag, and every flag can also be set through an
 // environment variable named MOCK_ and the flag in capitals, which is what lets
 // the compose file share profiles between backends. With -admin, a second port
-// changes the backend's faults while it runs.
+// changes the backend's faults while it runs and serves its metrics.
 package main
 
 import (

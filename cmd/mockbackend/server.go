@@ -29,10 +29,13 @@ type server struct {
 	faults  *faults
 	clock   *clock
 	cache   *cache // nil when the backend remembers nothing
+	counts  *counts
 
 	// slots holds one token per request being served; it is nil when capacity
-	// is unlimited.
+	// is unlimited. busy counts the same requests whether there is a limit or
+	// not, for the metrics.
 	slots   chan struct{}
+	busy    atomic.Int64
 	waiting atomic.Int64
 
 	// stopping is closed when the process shuts down. A graceful shutdown waits
@@ -51,6 +54,7 @@ func newServer(p profile, seed uint64) *server {
 		sampler:  newSampler(p, seed),
 		faults:   newFaults(p, time.Now),
 		clock:    newClock(p, time.Now),
+		counts:   newCounts(),
 		stopping: make(chan struct{}),
 		body:     bodyFor(p.name, p.bodySize),
 	}
@@ -120,6 +124,12 @@ func (s *server) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Backend", s.profile.name)
 	ctx := r.Context()
 
+	// Every way out below that is not an answer is the client leaving first.
+	// The count is deferred so that it is made on the way out of a dropped
+	// answer too, which leaves by panicking.
+	result := outcomeAbandoned
+	defer func() { s.counts.outcomes[result].Add(1) }()
+
 	// A stopped process does not take the request in.
 	if !s.clock.wait(ctx) {
 		return
@@ -130,11 +140,14 @@ func (s *server) serve(w http.ResponseWriter, r *http.Request) {
 		if ctx.Err() != nil {
 			return
 		}
+		result = outcomeOverloaded
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "overloaded", http.StatusServiceUnavailable)
 		return
 	}
 	defer release()
+	s.busy.Add(1)
+	defer s.busy.Add(-1)
 
 	// The request is read in full before anything else, as a server that
 	// parses it would. It matters most for a request that is about to hang:
@@ -144,6 +157,7 @@ func (s *server) serve(w http.ResponseWriter, r *http.Request) {
 
 	chosen, ft := s.choose()
 	if chosen == modeHang {
+		result = string(modeHang)
 		s.hang(ctx)
 		return
 	}
@@ -156,6 +170,10 @@ func (s *server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	result = outcomeAnswered
+	if chosen != "" {
+		result = string(chosen)
+	}
 	switch chosen {
 	case modeError:
 		http.Error(w, s.profile.name+" failed", http.StatusInternalServerError)
@@ -185,12 +203,13 @@ func (s *server) serviceTime(w http.ResponseWriter, r *http.Request) time.Durati
 	took := float64(s.sampler.latency()) * s.clock.factor() * s.faults.slowdown()
 
 	if key := r.Header.Get(sessionHeader); key != "" && s.cache != nil {
-		if s.cache.seen(key) {
-			w.Header().Set("X-Cache", "hit")
-		} else {
-			w.Header().Set("X-Cache", "miss")
+		result := "hit"
+		if !s.cache.seen(key) {
+			result = "miss"
 			took += float64(s.profile.missPenalty)
 		}
+		w.Header().Set("X-Cache", result)
+		s.counts.cache[result].Add(1)
 	}
 	return time.Duration(took)
 }
