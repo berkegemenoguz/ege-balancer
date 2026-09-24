@@ -69,6 +69,21 @@
         "titleFormat": "reload rejected",
         "textFormat": "the file was invalid; the running configuration was kept",
         "useValueForTime": false
+      },
+      {
+        "name": "Fault in force",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ege-balancer-prometheus"
+        },
+        "enable": true,
+        "iconColor": "orange",
+        "expr": "label_replace(mock_fault_in_force == 1, \"name\", \"$1\", \"backend\", \"([^:]+).*\")",
+        "step": "5s",
+        "titleFormat": "{{mode}} on {{name}}",
+        "textFormat": "injected through the admin port",
+        "tagKeys": "name,mode",
+        "useValueForTime": false
       }
     ]
   },
@@ -1203,7 +1218,7 @@
     {
       "type": "timeseries",
       "title": "Failed attempts by backend",
-      "description": "Attempts a backend could not serve: refused or timed-out connections, and 5xx when retry_on_5xx is set.",
+      "description": "Attempts a backend could not serve: no connection, no answer in time, a connection or an answer broken off, and 5xx when retry_on_5xx is set. The Faults dashboard shows which.",
       "id": 10,
       "datasource": {
         "type": "prometheus",

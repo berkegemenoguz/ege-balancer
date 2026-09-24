@@ -2,7 +2,7 @@ apiVersion: 1
 
 providers:
   - name: ege-balancer
-    # The three dashboards link to each other; the folder keeps them together.
+    # The four dashboards link to each other; the folder keeps them together.
     folder: Ege-Balancer
     type: file
     options:

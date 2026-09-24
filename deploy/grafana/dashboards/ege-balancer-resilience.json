@@ -69,6 +69,21 @@
         "titleFormat": "reload rejected",
         "textFormat": "the file was invalid; the running configuration was kept",
         "useValueForTime": false
+      },
+      {
+        "name": "Fault in force",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ege-balancer-prometheus"
+        },
+        "enable": true,
+        "iconColor": "orange",
+        "expr": "label_replace(mock_fault_in_force == 1, \"name\", \"$1\", \"backend\", \"([^:]+).*\")",
+        "step": "5s",
+        "titleFormat": "{{mode}} on {{name}}",
+        "textFormat": "injected through the admin port",
+        "tagKeys": "name,mode",
+        "useValueForTime": false
       }
     ]
   },
