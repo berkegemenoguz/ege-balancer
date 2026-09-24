@@ -782,3 +782,95 @@ refused, for a client that had simply left.
 | The same, after | 5 of 15 unanswered, the ones sent to the hanging backend; no failure counted, no retry, all three healthy |
 | After, 6 clients waiting up to 10 s | all answered 200; the three sent to the hanging backend after the 3 s response timeout, counted against it as timeouts and retried elsewhere |
 | The whole suite with the race detector | green; `internal/proxy` at 95.3% of statements |
+
+## The Faults dashboard
+
+**Why.** The mock backends can fail in six ways, but the balancer counted every failure the same
+way, and the dashboards showed only the balancer's side. A hang, a dropped connection and a stopped
+container all raised one counter, and whether the backend had done what it seemed to have done
+could only be guessed.
+
+### What was built
+
+- **The mocks' own metrics.** `GET /metrics` on the admin port: what the backend did with each
+  request — answered, hang, reset, drip, error, overloaded, or abandoned when the client left first —
+  cache hits and misses, faults injected and in force, busy workers, capacity, queue and cold-start
+  factor. 26 series per backend.
+- **A reason on every failed attempt.** `lb_backend_failures_total` gains `reason`: `connect`,
+  `timeout`, `reset`, `cut_off`, `5xx` or `other`.
+- **Prometheus scrapes the mocks.** A `mocks` job reads the ten admin ports and labels each with
+  the address the balancer forwards to, `backend="backend-3:5678"`, so the dashboards' backend
+  selector and colours work on both views unchanged.
+- **The Faults dashboard.** Its rows follow a fault from the backend to the client: right now,
+  faults in force, what the backends did, what the balancer saw, what the clients got, and what the
+  backends remember. Every dashboard shades the time a fault was in force.
+- **The console** points at the new dashboard after injecting a fault, and its descriptions name
+  the reason each fault is counted under.
+
+### Decisions
+
+- **The mocks' metrics are written by hand.** A few dozen counters and gauges and no histograms do
+  not need the client library, and the mock stays a program of the standard library alone: its
+  image is still built from `go.mod` and its own package. A test reads the output back with
+  Prometheus's own parser, which is the check that matters for hand-written output.
+- **Every series exists from the start, at zero.** A counter that first appears at 1 loses that
+  first event to `rate()`.
+- **The outcome is counted on the way out.** A dropped answer leaves the handler by panicking, and
+  only a deferred count sees it. A request that ends any other way before it is answered is counted
+  as abandoned.
+- **`cut_off` is decided where the abort is seen, not from the error.** The error of a broken-off
+  answer is `unexpected EOF`, which read on its own would say `reset`.
+- **A failed connection is checked before a timeout**, since a connect timeout is both.
+- **The balancer's failure counters are created at zero too**, six per backend, at start and on
+  every reload. See below for why.
+- **The injected-faults timeline has one row per backend, always present.** A query returning only
+  the faults in force gives the timeline no data at all when there are none, which it reports as an
+  error. The mode in force is encoded as a number and named by value mappings.
+
+### What went wrong
+
+- **The first stop of a backend showed no failures.** Stopping backend-8 cost it three `connect`
+  failures and its place in the pool within half a second, and the dashboard showed none: the
+  series for backend-8 and `connect` came into being with its first three failures, and `rate()`
+  cannot see a jump from nothing. The reason label made this likely — a backend and a reason seen
+  together for the first time — where before only a backend's very first failure was lost. Every
+  backend's six counters are now created at zero; stopping backend-6 afterwards showed its three.
+- **The injected-faults timeline showed nothing, twice.** Built from only the faults in force, it
+  had no data when there were none and reported that as an error. Rebuilt with a row per backend,
+  it merged every row into one state: under threshold colouring, Grafana's state timeline groups
+  values by threshold range and ignores value mappings. It now uses a fixed colour. The health
+  timeline had the same setting all along and looked right only because its thresholds coincide with
+  its two values.
+- **Stacked graphs showed failures that did not happen.** A series at zero on top of a stack draws
+  its line at the stack's height, and the outcome graph seemed to show overloaded and failing
+  requests during a hang. The fault graphs are no longer stacked, and the graph of what clients
+  received uses a logarithmic axis, so that a few failures a second show next to forty answers.
+- **Two descriptions promised more than was measured.** The latency panel is the time of the
+  attempt that answered, so the three seconds lost to a hang before a retry do not appear in it; the
+  panel now says so, and the metric is unchanged. And an answer cut off part way usually reaches the
+  client as nothing at all: the part sent fits in the balancer's buffer, and the connection closes
+  before it is flushed. At the client, 98 of the 101 cut-off answers arrived as a connection closed
+  with no answer.
+- **One live comparison was spoiled by health checking.** Faulting one backend with each mode in
+  turn, the cut-off answer after three timeouts was the third failure in a row and took the backend
+  out of the pool, so the next fault reached it less. Each fault now starts with the whole pool
+  healthy.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Prometheus configuration | valid by `promtool`; the ten mock targets up, each labelled `backend="backend-N:5678"` |
+| Every query of the Faults dashboard | runs against Prometheus without an error |
+| backend-3 hanging half its requests for 60 s, at 40 req/s through the stack | 72 hangs counted by the mock, 72 `timeout` by the balancer, 71 retries, 7 POSTs refused as `not_retryable`; backend-3 out of the pool while it lasted |
+| backend-5 dropping 30% of its answers half way for 60 s | 54 resets counted by the mock, 54 `cut_off` by the balancer; backend-5 out of the pool |
+| backend-7 frozen for 45 s | 14 `timeout` by the balancer, about as many requests abandoned by the mock's count; its metrics scraped throughout; out of the pool |
+| backend-9 answering 500 to everything for 45 s | 186 errors by the mock, 183 passed on to clients, none counted as failures with `retry_on_5xx` off |
+| backend-4 four times slower for 45 s | its median from 19 to 71 ms; backend-1's from 21 to 23 ms |
+| backend-2's cache cleared | sessions remembered from 435 to 4, then refilling |
+| backend-8 stopped for 40 s | 3 `connect`, out of the pool within half a second, 9 of 10 mocks reachable; the failures invisible to `rate()` until the counters were created at zero; backend-6 stopped afterwards showed its 3 |
+| All four dashboards | the time each fault was in force shaded; the timeline names each fault on its backend |
+| Three mocks on the host through the balancer | hang counted as `timeout`, a dropped answer as `cut_off`, a stopped backend as `connect`, a 500 passed on and not counted; each count matching the mock's own |
+| The clients over nine minutes | 21,291 answered 200, 180 answered 500, 16 POSTs refused with 503, 101 answers cut off against 100 `cut_off` counted by the balancer; 12 connection errors while the balancer's container was rebuilt part way |
+| Tests | the mock's metrics read back by Prometheus's parser; each reason produced by a real backend; reverting the deferred count, the `cut_off` path, the order of the checks or the counters prepared on reload each fails a test |
+| The whole suite with the race detector | green; `cmd/mockbackend` at 88.7%, `internal/proxy` at 96.9%, `internal/observability` at 99.0% |
