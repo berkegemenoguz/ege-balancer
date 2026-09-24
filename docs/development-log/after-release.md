@@ -741,3 +741,44 @@ fails in the middle of an exchange.
 | Live, a backend hanging every POST | 503 as `not_retryable` after 3 s, where before the client got an empty reply after 10 s |
 | Live, a backend cutting off every answer | 33 failures recorded against it as `unexpected EOF`; the cut-off GETs sent again by the client, 27 of them, the POSTs failing at the client, 24 |
 | The whole suite with the race detector | green; `internal/proxy` at 95.2% of statements |
+
+## Clients that give up
+
+**Why.** Breaking the balancer's failed attempts down by reason, for a dashboard of faults, meant
+listing every error that reaches a backend's record. One of them was `context canceled`: the
+client's own request, cancelled when the client gave up. A scratch test with a client that waited
+200 ms for three slow backends found all three blamed, two retries sent and one request counted as
+refused, for a client that had simply left.
+
+### What was wrong
+
+- **The backend was blamed.** When the client went away before the answer began, the forwarder
+  ended the attempt with the cancelled request's error, and the attempt was recorded as the
+  backend's failure — health checker, circuit breaker, `lb_backend_failures_total`. v1.3.1 had
+  stopped this for a client leaving part way through an answer, but not for one leaving before it.
+- **The request was retried.** The retry loop went on to the next backend with the same cancelled
+  request, which failed at once and was counted against that backend too, and so on until the
+  attempts ran out, ending with a refusal counted as `no_backend_available`.
+- **Together with round robin it made an outage.** Each attempt moved round robin on by one, so
+  with three backends and three attempts every request began where the last had: at the backend
+  that made clients give up. In the code since v1.0.0.
+
+### What was done
+
+- An attempt that ends because the client has gone is not recorded against the backend.
+- The retry loop stops as soon as the client has gone, with nothing written and nothing counted.
+- The load generator's clean stop, added during the campaign against the profiled backends for this
+  very behaviour, stays: it keeps every request it sent measured. Its comment and README no longer
+  present the balancer's miscounting as the reason.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| A client giving up on three slow backends, `retry_next_backend` | one backend offered the request, no failure reported, nothing refused |
+| The same with the retry loop's check removed | a refusal counted as `no_backend_available` |
+| The same with the attempt's check removed | the first backend blamed, in the health checker and the metrics |
+| Live, three mocks, one hanging every request, 15 clients each giving up after 1 s — before | 14 of 15 unanswered; 14 failures counted against each backend, 28 retries, all three marked unhealthy |
+| The same, after | 5 of 15 unanswered, the ones sent to the hanging backend; no failure counted, no retry, all three healthy |
+| After, 6 clients waiting up to 10 s | all answered 200; the three sent to the hanging backend after the 3 s response timeout, counted against it as timeouts and retried elsewhere |
+| The whole suite with the race detector | green; `internal/proxy` at 95.3% of statements |
