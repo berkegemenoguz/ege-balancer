@@ -1,5 +1,5 @@
-# Prometheus scrapes the load balancer's metrics port. The balancer runs as a
-# compose service alongside the mock backends it forwards to.
+# Prometheus scrapes the load balancer's metrics port, and the admin port of
+# each mock backend it forwards to. All of them run as compose services.
 global:
   # Five seconds in this development stack, so the dashboard reacts while
   # someone is watching it. The production guidance is 15s; see section 7.6 of
@@ -14,3 +14,26 @@ scrape_configs:
     # loadbalancer service and point this at "host.docker.internal:8081".
     # Scraping both at once double counts: the compose service publishes 8081
     # on the host, so both addresses reach the same process.
+
+  # What the mock backends did with their requests, and the faults in force on
+  # them, from their admin port. Each is labelled with the address the balancer
+  # forwards to — backend="backend-3:5678", the label the balancer's own series
+  # carry — so that the two views of one backend line up on a dashboard.
+  - job_name: mocks
+    static_configs:
+      - targets:
+          - backend-1:5679
+          - backend-2:5679
+          - backend-3:5679
+          - backend-4:5679
+          - backend-5:5679
+          - backend-6:5679
+          - backend-7:5679
+          - backend-8:5679
+          - backend-9:5679
+          - backend-10:5679
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "([^:]+):5679"
+        target_label: backend
+        replacement: "$1:5678"
