@@ -532,7 +532,7 @@ Bu sürümde güvenlik, ağır bir katmandan çok, ucuz ama etkisi büyük önle
 | --- | --- | --- | --- |
 | `lb_requests_total` | counter | backend, status | bir backend'in cevapladığı istekler |
 | `lb_request_duration_seconds` | histogram | backend | yük dengeleyicide ölçülen servis süresi |
-| `lb_backend_failures_total` | counter | backend | bir backend'in karşılayamadığı denemeler |
+| `lb_backend_failures_total` | counter | backend, reason | bir backend'in karşılayamadığı denemeler ve nedeni |
 | `lb_retries_total` | counter | — | gönderilen retry'lar |
 | `lb_rejected_requests_total` | counter | reason | yük dengeleyicinin kendisinin reddettiği istekler (§6.6) |
 | `lb_config_reloads_total` | counter | result | uygulanan ya da reddedilen yenilemeler |
@@ -541,6 +541,14 @@ Bu sürümde güvenlik, ağır bir katmandan çok, ucuz ama etkisi büyük önle
 
 İki gauge, ayrı değişkenlere kopyalanmak yerine Prometheus scrape ettiğinde canlı durumdan okunur;
 böylece zamanla sapabilecek ikinci bir kopya yoktur.
+
+Başarısız bir deneme, alışverişin sırasına göre altı nedenden birini taşır: hiç bağlantı
+kurulamadıysa `connect`, yanıt zaman aşımı içinde hiçbir yanıt başlamadıysa `timeout`, bağlantı yanıt
+başlamadan kapandıysa `reset`, yanıt yarıda kesildiyse `cut_off`, `retry_on_5xx` açıkken gelen bir
+5xx yanıt için `5xx` ve geri kalan her şey için `other`. Vazgeçen bir istemci hiç sayılmaz (§6.3).
+Her backend'in altı sayacı baştan, sıfırla vardır: ilk hatalarıyla birlikte ortaya çıkan bir seri
+onların sayısıyla başlar ve `rate()` hiçlikten bir sıçramayı göremez; bir kez çöken bir backend hiç
+hata göstermezdi. Neden etiketi v1.3.2'den sonra eklendi (Ek B, 17. madde).
 
 ### 8.2 Durum, loglar ve profilleme
 
@@ -572,18 +580,25 @@ bunu `/healthz` üzerinde çalıştırır (Ek B, 14. madde).
 
 ### 8.3 İzleme yığını
 
-Compose ortamı, beş saniyede bir scrape eden Prometheus'u ve birbirine bağlı üç hazır dashboard'lu Grafana'yı çalıştırır. *Overview* ekranda açık tutulacak
-olandır: öne çıkan değerler, backend başına istek oranı ve trafik payı, gecikme ve bir sağlık
-şeridi. *Backends* backend'leri karşılaştırır — bir tablo, trafik payı, bir pencere üzerinden
-ortalanmış uçuştaki istekler, backend başına p95 gecikme ve bir gecikme ısı haritası.
-*Resilience* hataların etkisini gösterir: durum sınıfına göre yanıtlar, nedenlerine göre retler,
-budget'a karşı retry'lar ve yenilemeler.
+Compose ortamı, yük dengeleyiciyi ve her mock backend'in yönetim portunu (§9.4) beş saniyede bir
+scrape eden Prometheus'u ve birbirine bağlı dört hazır dashboard'lu Grafana'yı çalıştırır.
+*Overview* ekranda açık tutulacak olandır: öne çıkan değerler, backend başına istek oranı ve trafik
+payı, gecikme ve bir sağlık şeridi. *Backends* backend'leri karşılaştırır — bir tablo, trafik payı,
+bir pencere üzerinden ortalanmış uçuştaki istekler, backend başına p95 gecikme ve bir gecikme ısı
+haritası. *Resilience* hataların etkisini gösterir: durum sınıfına göre yanıtlar, nedenlerine göre
+retler, budget'a karşı retry'lar ve yenilemeler. *Faults* bir arızayı backend'den istemciye kadar
+izler: enjekte edilen arızalar; mock backend'lerin normal cevap vermek yerine ne yaptığı, işçileri,
+kuyrukları, soğuk başlangıçları ve önbellekleriyle; yük dengeleyicinin nedene ve backend'e göre
+başarısız denemeleri, sağlık kontrolleri ve retry'ları; ve istemcilerin ne aldığı, yarıda kesilen
+yanıtlar dahil. Bir mock'un serileri yük dengeleyicinin ilettiği adresle etiketlenir; böylece bir
+backend'in iki görünümü aynı hizaya gelir.
 
-Üç seçim onları okunur kılar. Her grafik yapılandırma yenilemelerini işaretler; böylece bir
-değişikliğin etkisi yapıldığı ana göre görülür. Her backend profilinin rengini korur (§9.4). Ve
-uçuştaki istek göstergesi ortalanmış gösterilir: hafif yükte beş saniyede bir örneklendiğinde çoğu
-zaman 0 ya da 1 okunur ve bir backend'in ne kadar meşgul olduğu hakkında bir şey söylemez.
-Dashboard'lar bir betikle üretilir, böylece üçü tutarlı kalır. Bu yığını çalıştırmaktan çıkan iki
+Üç seçim onları okunur kılar. Her grafik yapılandırma yenilemelerini ve bir mock backend'e enjekte
+edilen bir arızanın etkin olduğu süreyi işaretler; böylece bir etki, ona yol açan ana göre görülür.
+Her backend profilinin rengini korur (§9.4). Ve uçuştaki istek göstergesi ortalanmış gösterilir:
+hafif yükte beş saniyede bir örneklendiğinde çoğu zaman 0 ya da 1 okunur ve bir backend'in ne kadar
+meşgul olduğu hakkında bir şey söylemez. Dashboard'lar bir betikle üretilir, böylece dördü tutarlı
+kalır. Bu yığını çalıştırmaktan çıkan iki
 kaynak bulgusu Ek B'de (7. madde) kayıtlıdır: Grafana daha yüksek bir sınır yerine bir Go bellek
 bütçesine (`GOMEMLIMIT`) ihtiyaç duyar; Prometheus 256 MB'a sığar.
 
@@ -659,7 +674,7 @@ program, `cmd/mockbackend`, her backend için bir profille çalıştırılıyor:
 | `hang-rate`, `reset-rate`, `drip-rate`, `drip-over` | cevapsız bekletilen, yanıtın ortasında bağlantısı düşürülen ya da yanıtı `drip-over` boyunca damlatılan isteklerin payları |
 | `cold-start`, `cold-factor` | başladıktan sonra backend'in ne kadar süre yavaş olduğu ve başta ne kadar yavaş olduğu |
 | `pause-every`, `pause` | her dönemin sonunda, sağlık ucu dahil bütün sürecin durması |
-| `admin` | backend çalışırken arızaların başlatılıp temizlendiği ikinci bir port |
+| `admin` | backend çalışırken arızaların başlatılıp temizlendiği ve metriklerinin sunulduğu ikinci bir port |
 | `seed` | gecikme ve hata dizisini tekrarlanabilir kılar |
 
 Gecikme yalnızca istek bir işçi tutarken harcanır; böylece kapasitesi düşük bir backend, gerçek bir
@@ -684,7 +699,10 @@ sonra kendiliğinden biter. İki nedenle ayrı bir sunucudur. Yük dengeleyici t
 yolu iletir; orada bir uç, yük dengeleyicinin her istemcisinin erişebileceği bir uç olurdu. Yönetim
 portu ise yalnızca loopback arayüzünde yayınlanır. Ayrıca oradaki hiçbir şey arıza katmanını
 beklemez; backend takılmış ya da donmuşken de, yani birinin onu durdurmak istediği tam o anda, cevap
-verir. Demo konsolunun arıza eylemi onu kullanır.
+verir. Demo konsolunun arıza eylemi onu kullanır. Backend'in kendi metriklerini de Prometheus
+biçiminde sunar — backend'in her istekle ne yaptığı, etkin arızalar, işçileri, kuyruğu, soğuk
+başlangıcı ve önbelleği — ve mock bağımlılıksız kalsın diye bunlar standart kütüphaneyle yazılır
+(§8.3).
 
 | Backend'ler | Profil | Gecikme (medyan, p99) | Kapasite, kuyruk | Yanıt |
 | --- | --- | --- | --- | --- |
@@ -1410,6 +1428,27 @@ olmadan bunlar hizalanamaz. İstemcinin kendi kimliği, daha önce başlamış b
 kopmasın diye korunur; her backend'in loguna ulaştığı için de sınırlanır ve denetlenir. Hız sınırlama
 ve doğrulamadan önce atanır, böylece yük dengeleyicinin kendisinin reddettiği bir istek de
 izlenebilir.
+
+### B.17 Başarısız denemeler bir neden taşır ve mock backend'ler de scrape edilir
+
+*v1.6 §7.6 · v1.3.2'den sonra · §8.1, §8.3, §9.4*
+
+**v1.6.** Prometheus yük dengeleyicinin `/metrics`'ini scrape eder ve tek bir Grafana dashboard'u
+istek oranını, hata oranını, gecikmeyi, aktif bağlantıları ve sağlığı gösterir.
+
+**Bunun yerine.** `lb_backend_failures_total` bir `reason` taşır — connect, timeout, reset,
+cut_off, 5xx ya da other. Prometheus ayrıca her mock backend'in yönetim portunu da scrape eder; bu
+port backend'in istekleriyle ne yaptığını ve hangi arızaların etkin olduğunu bildirir. Dördüncü bir
+dashboard, *Faults*, ikisini yan yana koyar ve her dashboard bir arızanın etkin olduğu süreyi
+işaretler.
+
+**Neden.** Mock backend'ler birkaç farklı biçimde bozulabilir hale gelince (13. madde), hataların
+sayısı hangisinin olduğunu artık söyleyemiyordu: bir takılma, düşen bir bağlantı ve durmuş bir
+konteyner aynı sayacı artırıyordu. Yalnızca yük dengeleyiciden bakınca bir arıza tahmin edilebilir
+ama doğrulanamaz; backend'in kendi sayımı nedeni, yük dengeleyicininki sonucu gösterir. Mock'ların
+metrikleri Prometheus istemcisi yerine standart kütüphaneyle yazılır; böylece mock bağımlılıksız
+bir program olarak kalır ve bir test onları Prometheus'un kendi ayrıştırıcısıyla geri okur.
+Nedenleri listelemek, v1.3.2'de düzeltilen hatayı da bulan şeydi (§11.1).
 
 ### Yapılmayan: epoll deneyi
 
