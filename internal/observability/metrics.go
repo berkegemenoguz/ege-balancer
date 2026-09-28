@@ -20,7 +20,26 @@ type Metrics struct {
 	retries    prometheus.Counter
 	rejections *prometheus.CounterVec
 	reloads    *prometheus.CounterVec
+	placements *prometheus.CounterVec
 }
+
+// Where consistent hashing placed a request.
+const (
+	// PlacementHome: on the backend its key belongs to.
+	PlacementHome = "home"
+	// PlacementOverloaded: on the next backend for its key, because its own was
+	// over the bound.
+	PlacementOverloaded = "overloaded"
+	// PlacementUnavailable: on the next backend for its key, because its own
+	// was out of the pool.
+	PlacementUnavailable = "unavailable"
+	// PlacementKeyless: by load, because the request carried no key.
+	PlacementKeyless = "keyless"
+)
+
+// placements are every placement, created at zero so that the first request
+// of each kind is a change rate() can see.
+var placements = []string{PlacementHome, PlacementOverloaded, PlacementUnavailable, PlacementKeyless}
 
 // NewMetrics registers the load balancer's own collectors on a private
 // registry, so that the exposed metrics are only the ones defined here.
@@ -54,9 +73,16 @@ func NewMetrics() *Metrics {
 			Name: "lb_config_reloads_total",
 			Help: "Configuration reloads, by whether they were applied or rejected.",
 		}, []string{"result"}),
+		placements: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lb_hash_placements_total",
+			Help: "Requests placed by consistent hashing, by where they went: home, overloaded, unavailable or keyless.",
+		}, []string{"placement"}),
+	}
+	for _, placement := range placements {
+		m.placements.WithLabelValues(placement)
 	}
 
-	m.registry.MustRegister(m.requests, m.duration, m.failures, m.retries, m.rejections, m.reloads)
+	m.registry.MustRegister(m.requests, m.duration, m.failures, m.retries, m.rejections, m.reloads, m.placements)
 	return m
 }
 
@@ -81,6 +107,11 @@ func (m *Metrics) PrepareBackendFailures(backend string, reasons ...string) {
 	for _, reason := range reasons {
 		m.failures.WithLabelValues(backend, reason)
 	}
+}
+
+// ObservePlacement records where consistent hashing placed a request.
+func (m *Metrics) ObservePlacement(placement string) {
+	m.placements.WithLabelValues(placement).Inc()
 }
 
 // ObserveRetry records a retry the retry budget allowed.

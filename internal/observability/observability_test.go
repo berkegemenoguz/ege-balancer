@@ -53,6 +53,24 @@ func TestMetricsReportServedRequests(t *testing.T) {
 	}
 }
 
+func TestPlacementsAreCountedFromZero(t *testing.T) {
+	metrics := NewMetrics()
+	metrics.ObservePlacement(PlacementHome)
+	metrics.ObservePlacement(PlacementHome)
+
+	body := scrape(t, metrics.Handler())
+	for _, want := range []string{
+		`lb_hash_placements_total{placement="home"} 2`,
+		`lb_hash_placements_total{placement="overloaded"} 0`,
+		`lb_hash_placements_total{placement="unavailable"} 0`,
+		`lb_hash_placements_total{placement="keyless"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics do not contain %q", want)
+		}
+	}
+}
+
 func TestPreparedFailureCountersStartAtZero(t *testing.T) {
 	metrics := NewMetrics()
 	metrics.PrepareBackendFailures("backend-1:5678", "connect", "timeout")
