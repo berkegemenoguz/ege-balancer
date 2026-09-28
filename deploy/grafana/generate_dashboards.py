@@ -290,6 +290,25 @@ def backends():
         health_timeline(L, 12, 12, 8),
     ]
     L.y += 8
+    P.append(row(L, "Consistent hashing"))
+    placements = f"sum by (placement) (rate(lb_hash_placements_total[{W}]))"
+    keyed = f'sum(rate(lb_hash_placements_total{{placement!="keyless"}}[{W}]))'
+    P += [
+        timeseries(L, "Where hashed requests went", [target(placements, "{{placement}}")],
+                   0, 12, 8, "reqps", no_value="consistent_hash is not in force",
+                   overrides=[fixed("home", "green"), fixed("overloaded", "orange"),
+                              fixed("unavailable", "red"), fixed("keyless", "blue")],
+                   description="Requests placed by consistent hashing: on the backend their key belongs to (home), on the next because that one was over the balance factor (overloaded) or out of the pool (unavailable), or by load because they carried no key (keyless). Retries are not counted again."),
+        stat(L, "Kept at home", [target(f'sum(rate(lb_hash_placements_total{{placement="home"}}[{W}])) / {keyed}')],
+             12, 6, 8, "percentunit", decimals=1, no_value="—",
+             steps=[{"color": "red", "value": None}, {"color": "orange", "value": 0.9}, {"color": "green", "value": 0.98}],
+             description="Share of the requests with a key that reached the backend their key belongs to. What is lost went to another backend because of the bound or of health checking."),
+        stat(L, "Cache hit rate", [target(f'sum(rate(mock_cache_requests_total{{result="hit"}}[{W}])) / sum(rate(mock_cache_requests_total[{W}]))')],
+             18, 6, 8, "percentunit", decimals=1, no_value="—",
+             steps=[{"color": "red", "value": None}, {"color": "orange", "value": 0.5}, {"color": "green", "value": 0.9}],
+             description="Share of the requests naming a session that the mock backend remembered, across the pool. Keeping sessions at home is what raises it; only the realistic backends remember anything."),
+    ]
+    L.y += 8
     return dashboard("ege-balancer-backends", "Ege-Balancer — Backends",
                      "How each backend is doing and how the traffic is shared between them.", P)
 
