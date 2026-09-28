@@ -295,12 +295,19 @@ func changeAlgorithm(ctx context.Context, con *console, env *environment) {
 	// so choosing it here also gives the first backend a heavier share; there
 	// is nothing to see otherwise.
 	con.step("3  weighted_round_robin, with the first backend given weight 5")
+	con.step("4  consistent_hash, placing each session on its own backend")
 
 	switch choice := con.ask("which algorithm?"); choice {
-	case "1", "2":
-		names := map[string]string{"1": "round_robin", "2": "least_connections"}
+	case "1", "2", "4":
+		names := map[string]string{"1": "round_robin", "2": "least_connections", "4": "consistent_hash"}
 		if err := env.setAlgorithm(ctx, con, names[choice]); err != nil {
 			con.fail("%v", err)
+			return
+		}
+		if choice == "4" {
+			con.note("every request naming the same X-Session now reaches the same backend:")
+			con.note("  curl -si -H 'X-Session: alice' localhost:8080 | grep X-Backend")
+			con.note("with the realistic backends, the cache hit rate on the Faults dashboard climbs")
 		}
 	case "3":
 		current := mustStatus(ctx, env)

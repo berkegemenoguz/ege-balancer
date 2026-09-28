@@ -12,6 +12,11 @@ actions ago cannot quietly make the next measurement look wrong:
 [weighted_round_robin · traffic on] action?
 ```
 
+Its requests name a client in an `X-Session` header — the sustained traffic one of 500 sessions at
+random, the distribution measurement a session of its own for each request — so that under
+`consistent_hash` they are placed as that many clients would be, and the mock backends' caches
+have something to remember. The other algorithms ignore the header.
+
 **This is a development tool.** It shells out to `docker` and writes to the configuration file,
 so it can stop containers and change how the balancer behaves. It never listens on a socket and
 every action it can take is fixed in the code, but it has no place on a server: run it on your

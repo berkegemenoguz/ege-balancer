@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"sort"
@@ -16,6 +17,14 @@ import (
 // sustainedRate is the request rate of the background traffic. It is enough to
 // give the dashboard a readable plateau without saturating anything.
 const sustainedRate = 20
+
+// The traffic names its client in an X-Session header, drawn from sessions
+// sessions: consistent hashing places requests by it, and the mock backends
+// remember it. The other algorithms ignore it.
+const (
+	sessionHeader = "X-Session"
+	sessions      = 500
+)
 
 // traffic keeps a steady stream of requests running until it is stopped, so
 // that the dashboard has something to show while someone is talking over it.
@@ -79,9 +88,15 @@ func (t *traffic) halt() bool {
 	return true
 }
 
-// once sends a single request and discards the answer.
+// once sends a single request from one of the sessions and discards the
+// answer.
 func (t *traffic) once() {
-	response, err := t.client.Get(t.url)
+	request, err := http.NewRequest(http.MethodGet, t.url, nil)
+	if err != nil {
+		return
+	}
+	request.Header.Set(sessionHeader, "session-"+strconv.Itoa(rand.IntN(sessions)))
+	response, err := t.client.Do(request)
 	if err != nil {
 		return
 	}
@@ -91,7 +106,9 @@ func (t *traffic) once() {
 
 // measure sends count requests and reports which backend answered each one.
 // The distribution comes from the responses themselves, so it is what the
-// client saw rather than what a counter says.
+// client saw rather than what a counter says. Each request names a session of
+// its own, so that consistent hashing spreads them as it would that many
+// clients.
 func (e *environment) measure(ctx context.Context, count int) (map[string]int, map[int]int) {
 	const workers = 8
 
@@ -102,9 +119,9 @@ func (e *environment) measure(ctx context.Context, count int) (map[string]int, m
 		wg       sync.WaitGroup
 	)
 
-	requests := make(chan struct{}, count)
-	for range count {
-		requests <- struct{}{}
+	requests := make(chan int, count)
+	for i := range count {
+		requests <- i
 	}
 	close(requests)
 
@@ -112,11 +129,12 @@ func (e *environment) measure(ctx context.Context, count int) (map[string]int, m
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for range requests {
+			for i := range requests {
 				request, err := http.NewRequestWithContext(ctx, http.MethodGet, e.trafficURL, nil)
 				if err != nil {
 					return
 				}
+				request.Header.Set(sessionHeader, "session-"+strconv.Itoa(i))
 				response, err := e.client.Do(request)
 				if err != nil {
 					mu.Lock()
