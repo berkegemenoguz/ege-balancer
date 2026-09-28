@@ -1,5 +1,6 @@
 // Package balancer defines the LBStrategy interface and its implementations:
-// round robin, least connections and weighted round robin. The active strategy
+// round robin, least connections, weighted round robin and consistent hashing,
+// which also places requests by key through KeyedStrategy. The active strategy
 // is selected through configuration.
 package balancer
 
@@ -25,6 +26,9 @@ type Backend struct {
 	weight atomic.Int64
 	// active counts the requests currently being served by this backend.
 	active atomic.Int64
+	// hash is the hash of Addr for consistent hashing, computed on first use
+	// and zero until then.
+	hash atomic.Uint64
 }
 
 // NewBackend returns a backend at addr with the given weight.
@@ -69,8 +73,9 @@ type LBStrategy interface {
 	Name() string
 }
 
-// New builds the strategy named by the configured algorithm.
-func New(algorithm config.Algorithm) (LBStrategy, error) {
+// New builds the strategy named by the configured algorithm. hash configures
+// consistent hashing, and the other strategies ignore it.
+func New(algorithm config.Algorithm, hash config.ConsistentHash) (LBStrategy, error) {
 	switch algorithm {
 	case config.RoundRobin:
 		return NewRoundRobin(), nil
@@ -78,6 +83,8 @@ func New(algorithm config.Algorithm) (LBStrategy, error) {
 		return NewLeastConnections(), nil
 	case config.WeightedRoundRobin:
 		return NewWeightedRoundRobin(), nil
+	case config.ConsistentHashing:
+		return NewConsistentHash(hash.BalanceFactor), nil
 	default:
 		return nil, fmt.Errorf("unknown algorithm %s", algorithm)
 	}

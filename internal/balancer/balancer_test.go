@@ -11,10 +11,10 @@ import (
 
 func TestNewBuildsEveryConfiguredStrategy(t *testing.T) {
 	for _, algorithm := range []config.Algorithm{
-		config.RoundRobin, config.LeastConnections, config.WeightedRoundRobin,
+		config.RoundRobin, config.LeastConnections, config.WeightedRoundRobin, config.ConsistentHashing,
 	} {
 		t.Run(string(algorithm), func(t *testing.T) {
-			strategy, err := New(algorithm)
+			strategy, err := New(algorithm, config.ConsistentHash{})
 			if err != nil {
 				t.Fatalf("New returned an unexpected error: %v", err)
 			}
@@ -26,7 +26,7 @@ func TestNewBuildsEveryConfiguredStrategy(t *testing.T) {
 }
 
 func TestNewRejectsUnknownAlgorithm(t *testing.T) {
-	strategy, err := New(config.Algorithm("random"))
+	strategy, err := New(config.Algorithm("random"), config.ConsistentHash{})
 	if err == nil {
 		t.Fatalf("New returned %s, want an error", strategy.Name())
 	}

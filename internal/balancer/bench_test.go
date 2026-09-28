@@ -17,6 +17,7 @@ var strategies = []struct {
 	{"round_robin", func() LBStrategy { return NewRoundRobin() }},
 	{"least_connections", func() LBStrategy { return NewLeastConnections() }},
 	{"weighted_round_robin", func() LBStrategy { return NewWeightedRoundRobin() }},
+	{"consistent_hash_keyless", func() LBStrategy { return NewConsistentHash(0) }},
 }
 
 // poolSizes covers the mock environment and pools ten and a hundred times its
@@ -56,5 +57,38 @@ func BenchmarkSelectParallel(b *testing.B) {
 				}
 			})
 		})
+	}
+}
+
+// BenchmarkSelectFor measures consistent hashing with a key, which scores every
+// backend: without a bound, with one that the home backend is under, and with
+// one it is over, where the rest of the pool has to be ranked.
+func BenchmarkSelectFor(b *testing.B) {
+	for _, bench := range []struct {
+		name          string
+		balanceFactor int
+		homeFull      bool
+	}{
+		{"unbounded", 0, false},
+		{"bounded", 125, false},
+		{"bounded_home_full", 125, true},
+	} {
+		for _, size := range poolSizes {
+			b.Run(bench.name+"/"+strconv.Itoa(size), func(b *testing.B) {
+				backends, strategy := pool(size), NewConsistentHash(bench.balanceFactor)
+				if bench.homeFull {
+					home := strategy.Home("session-42", backends)
+					for range size {
+						home.Acquire()
+					}
+				}
+				b.ReportAllocs()
+				for b.Loop() {
+					if _, err := strategy.SelectFor("session-42", backends); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
 	}
 }

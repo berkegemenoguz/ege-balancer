@@ -40,7 +40,7 @@ type App struct {
 // configPath. Both sockets are bound by the time it returns, so Addr and
 // MetricsAddr can be read before serving.
 func New(cfg *config.Config, configPath string) (*App, error) {
-	strategy, err := balancer.New(cfg.Algorithm)
+	strategy, err := balancer.New(cfg.Algorithm, cfg.ConsistentHash)
 	if err != nil {
 		return nil, err
 	}
@@ -101,8 +101,8 @@ func (a *App) Reload(ctx context.Context) error {
 	}
 
 	strategy := a.handler.Strategy()
-	if next.Algorithm != a.cfg.Algorithm {
-		strategy, err = balancer.New(next.Algorithm)
+	if next.Algorithm != a.cfg.Algorithm || next.ConsistentHash != a.cfg.ConsistentHash {
+		strategy, err = balancer.New(next.Algorithm, next.ConsistentHash)
 		if err != nil {
 			slog.Error("reload rejected, keeping the running configuration", "error", err)
 			a.metrics.ObserveReload("rejected")
