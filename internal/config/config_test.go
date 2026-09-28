@@ -137,6 +137,30 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadReadsConsistentHashing(t *testing.T) {
+	for _, test := range []struct {
+		key    string
+		header string
+	}{
+		{"header:X-Session", "X-Session"},
+		{"client_ip", ""},
+	} {
+		content := replace(t, "algorithm:",
+			"algorithm: consistent_hash\nconsistent_hash:\n  key: "+test.key+"\n  balance_factor: 125")
+		cfg, err := Load(writeConfig(t, content))
+		if err != nil {
+			t.Fatalf("%s: Load returned an unexpected error: %v", test.key, err)
+		}
+		if cfg.Algorithm != ConsistentHashing || cfg.ConsistentHash.BalanceFactor != 125 {
+			t.Errorf("%s: algorithm %q, balance factor %d; want consistent_hash and 125",
+				test.key, cfg.Algorithm, cfg.ConsistentHash.BalanceFactor)
+		}
+		if header, isHeader := cfg.ConsistentHash.Header(); header != test.header || isHeader != (test.header != "") {
+			t.Errorf("%s: Header() = %q, %v; want %q", test.key, header, isHeader, test.header)
+		}
+	}
+}
+
 func TestLoadRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -147,6 +171,11 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"empty listen address", "listen_addr:", `listen_addr: ""`, "listen_addr is required"},
 		{"listen address without port", "listen_addr:", `listen_addr: "localhost"`, "not a host:port"},
 		{"unknown algorithm", "algorithm:", "algorithm: random", `algorithm "random" is unknown`},
+		{"consistent hash without a key", "algorithm:", "algorithm: consistent_hash", "consistent_hash.key is required"},
+		{"hash key of an unknown kind", "algorithm:", "algorithm: consistent_hash\nconsistent_hash:\n  key: cookie:session", `consistent_hash.key "cookie:session" is unknown`},
+		{"hash key naming no header", "algorithm:", "algorithm: consistent_hash\nconsistent_hash:\n  key: \"header:\"", `consistent_hash.key "header:" is unknown`},
+		{"hash key naming an impossible header", "algorithm:", "algorithm: consistent_hash\nconsistent_hash:\n  key: \"header:X Session\"", `consistent_hash.key "header:X Session" is unknown`},
+		{"balance factor below the average", "algorithm:", "algorithm: round_robin\nconsistent_hash:\n  balance_factor: 50", "balance_factor must be 0 for no bound, or a percentage of at least 100"},
 		{"unknown failure policy", "failure_policy:", "failure_policy: explode", `failure_policy "explode" is unknown`},
 		{"negative retries", "  max_retries:", "  max_retries: -1", "must not be negative"},
 		{"retry policy without retries", "  max_retries:", "  max_retries: 0", "must be at least 1 when failure_policy"},

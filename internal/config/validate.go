@@ -26,13 +26,14 @@ func (c *Config) validate() error {
 	}
 
 	switch c.Algorithm {
-	case RoundRobin, LeastConnections, WeightedRoundRobin:
+	case RoundRobin, LeastConnections, WeightedRoundRobin, ConsistentHashing:
 	case "":
 		add("algorithm is required")
 	default:
-		add("algorithm %q is unknown, expected %s, %s or %s",
-			c.Algorithm, RoundRobin, LeastConnections, WeightedRoundRobin)
+		add("algorithm %q is unknown, expected %s, %s, %s or %s",
+			c.Algorithm, RoundRobin, LeastConnections, WeightedRoundRobin, ConsistentHashing)
 	}
+	problems = append(problems, c.validateConsistentHash()...)
 
 	switch c.FailurePolicy {
 	case RetryNextBackend, FailFast, CircuitBreakerPolicy:
@@ -149,6 +150,42 @@ func (c *Config) validateTimeouts() []error {
 		}
 	}
 	return problems
+}
+
+func (c *Config) validateConsistentHash() []error {
+	var problems []error
+	hash := c.ConsistentHash
+	if hash.Key == "" && c.Algorithm == ConsistentHashing {
+		problems = append(problems, fmt.Errorf("consistent_hash.key is required when algorithm is %s", ConsistentHashing))
+	}
+	if hash.Key != "" && hash.Key != KeyClientIP {
+		if name, isHeader := hash.Header(); !isHeader || !isToken(name) {
+			problems = append(problems, fmt.Errorf(
+				"consistent_hash.key %q is unknown, expected header:<name> or %s", hash.Key, KeyClientIP))
+		}
+	}
+	if hash.BalanceFactor != 0 && hash.BalanceFactor < 100 {
+		problems = append(problems, errors.New(
+			"consistent_hash.balance_factor must be 0 for no bound, or a percentage of at least 100"))
+	}
+	return problems
+}
+
+// isToken reports whether s can be a header name: one or more of the
+// characters RFC 9110 allows in a token.
+func isToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Config) validateLimits() []error {

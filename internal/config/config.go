@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -17,6 +18,9 @@ const (
 	RoundRobin         Algorithm = "round_robin"
 	LeastConnections   Algorithm = "least_connections"
 	WeightedRoundRobin Algorithm = "weighted_round_robin"
+	// ConsistentHashing sends every request with the same key to the same
+	// backend; consistent_hash says what the key is.
+	ConsistentHashing Algorithm = "consistent_hash"
 )
 
 // FailurePolicy selects how the proxy reacts when a backend fails to serve a
@@ -63,6 +67,7 @@ type Config struct {
 	// for an operator to reach deliberately, not something to serve always.
 	EnablePprof    bool           `yaml:"enable_pprof"`
 	Algorithm      Algorithm      `yaml:"algorithm"`
+	ConsistentHash ConsistentHash `yaml:"consistent_hash"`
 	FailurePolicy  FailurePolicy  `yaml:"failure_policy"`
 	RetryOn5xx     bool           `yaml:"retry_on_5xx"`
 	Retry          Retry          `yaml:"retry"`
@@ -72,6 +77,33 @@ type Config struct {
 	Timeouts       Timeouts       `yaml:"timeouts"`
 	Limits         Limits         `yaml:"limits"`
 	Logging        Logging        `yaml:"logging"`
+}
+
+// ConsistentHash configures the consistent_hash algorithm. Like the circuit
+// breaker's settings, it may be present whatever the algorithm, and is only
+// read under its own.
+type ConsistentHash struct {
+	// Key is what a request is hashed on: "header:<Name>" for the value of a
+	// request header, or "client_ip" for the address the request came from.
+	// A request without one is balanced by least connections instead.
+	Key string `yaml:"key"`
+	// BalanceFactor bounds the load on any one backend, in per cent of its
+	// share of the requests in flight: a backend already serving that much
+	// passes the next request to the one after it for that key. 0 leaves the
+	// load unbounded.
+	BalanceFactor int `yaml:"balance_factor"`
+}
+
+// KeyClientIP hashes a request on the address it came from.
+const KeyClientIP = "client_ip"
+
+// Header is the request header the key is read from, when the key names one.
+func (h ConsistentHash) Header() (string, bool) {
+	name, found := strings.CutPrefix(h.Key, "header:")
+	if !found {
+		return "", false
+	}
+	return name, true
 }
 
 // Retry bounds how often a single request may be forwarded again, and how many
@@ -94,7 +126,8 @@ type CircuitBreaker struct {
 }
 
 // Backend is a single upstream server. A weight of zero means the default
-// weight of one; it is only consulted by the weighted round robin algorithm.
+// weight of one; it is consulted by weighted round robin and consistent
+// hashing.
 type Backend struct {
 	Addr   string `yaml:"addr"`
 	Weight int    `yaml:"weight"`
