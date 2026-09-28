@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,24 +14,25 @@ import (
 
 func TestRunMeasuresOnlyAfterTheWarmup(t *testing.T) {
 	var served, warm atomic.Int64
-	measuring := make(chan struct{})
+
+	// The warmup and the measurement are the same length, so the backend can
+	// count the requests of each phase apart. It reads the clock rather than
+	// waiting for a timer: its warmup ends no later than the generator's, which
+	// starts counting from a moment taken after this one, whereas a timer's
+	// callback can run late and count a measured request as warmup.
+	const phase = 300 * time.Millisecond
+	measuring := time.Now().Add(phase)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		select {
-		case <-measuring:
-			served.Add(1)
-		default:
+		if time.Now().Before(measuring) {
 			warm.Add(1)
+		} else {
+			served.Add(1)
 		}
 		w.Header().Set(backendHeader, "backend-1")
 		_, _ = w.Write([]byte("ok"))
 	}))
 	defer backend.Close()
-
-	// The warmup and the measurement are the same length, so the backend can
-	// count the requests of each phase apart.
-	const phase = 300 * time.Millisecond
-	time.AfterFunc(phase, func() { close(measuring) })
 
 	got := run(load{url: backend.URL, method: http.MethodGet}, "", 4, phase, phase, time.Second)
 
@@ -175,5 +178,40 @@ func TestRequestsTheClientSendsAgainAreCounted(t *testing.T) {
 
 	if got.ClientRetries == 0 {
 		t.Errorf("no request was counted as sent again, want the client's own retries seen")
+	}
+}
+
+func TestSkewedSessionsFavourAFew(t *testing.T) {
+	const draws = 20_000
+	count := func(shape load) map[string]int {
+		seen := map[string]int{}
+		session := shape.sessions()
+		for range draws {
+			seen[session()]++
+		}
+		return seen
+	}
+
+	// Uniformly, no session among a thousand gets much over its thousandth.
+	for session, n := range count(load{keys: 1000}) {
+		if n > draws/100 {
+			t.Errorf("uniform draws gave %s %d of %d, want none near a hundredth", session, n, draws)
+		}
+	}
+
+	// With a Zipf exponent of 1.2, the first session alone is drawn several
+	// times in ten, and every draw stays among the thousand.
+	skewed := count(load{keys: 1000, skew: 1.2})
+	if n := skewed["session-0"]; n < draws/5 {
+		t.Errorf("skewed draws gave session-0 %d of %d, want over a fifth", n, draws)
+	}
+	for session := range skewed {
+		if n, err := strconv.Atoi(strings.TrimPrefix(session, "session-")); err != nil || n < 0 || n >= 1000 {
+			t.Errorf("skewed draws named %q, want session-0 to session-999", session)
+		}
+	}
+
+	if names := count(load{}); len(names) != 1 || names[""] != draws {
+		t.Errorf("without keys the sessions named were %v, want none", names)
 	}
 }

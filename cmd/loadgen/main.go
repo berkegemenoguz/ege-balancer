@@ -48,6 +48,24 @@ type load struct {
 	// keys is how many client sessions the requests are spread over, each
 	// request naming one at random; zero names none.
 	keys int
+	// skew makes a few sessions far more popular than the rest: sessions are
+	// drawn from a Zipf distribution with this exponent, which is above 1.
+	// Zero draws them uniformly.
+	skew float64
+}
+
+// sessions returns what names the session of each request, for one worker:
+// the Zipf generator of math/rand/v2 is not safe for concurrent use, so every
+// worker draws from its own.
+func (l load) sessions() func() string {
+	switch {
+	case l.keys == 0:
+		return func() string { return "" }
+	case l.skew == 0:
+		return func() string { return "session-" + strconv.Itoa(rand.IntN(l.keys)) }
+	}
+	zipf := rand.NewZipf(rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())), l.skew, 1, uint64(l.keys-1))
+	return func() string { return "session-" + strconv.FormatUint(zipf.Uint64(), 10) }
 }
 
 func main() {
@@ -61,6 +79,7 @@ func main() {
 	method := flag.String("method", http.MethodGet, "method of every request")
 	bodySize := flag.Int("body-size", 0, "bytes of body sent with every request")
 	keys := flag.Int("keys", 0, "client sessions to spread the requests over, named in X-Session; 0 names none")
+	skew := flag.Float64("zipf", 0, "draw the sessions from a Zipf distribution with this exponent, above 1, so that a few are far more popular; 0 draws them uniformly")
 	label := flag.String("label", "", "label recorded with the result, such as the algorithm in force")
 	shape := flag.Bool("histogram", false, "also print the latency distribution")
 	out := flag.String("json", "", "also write the result as JSON to this file")
@@ -72,8 +91,11 @@ func main() {
 	if *bodySize < 0 || *keys < 0 {
 		log.Fatal("body-size and keys must not be negative")
 	}
+	if *skew != 0 && (*skew <= 1 || *keys == 0) {
+		log.Fatal("zipf must be above 1, and needs keys")
+	}
 
-	traffic := load{url: *target + *path, method: strings.ToUpper(*method), keys: *keys}
+	traffic := load{url: *target + *path, method: strings.ToUpper(*method), keys: *keys, skew: *skew}
 	if *bodySize > 0 {
 		traffic.body = bytes.Repeat([]byte("x"), *bodySize)
 	}
@@ -181,18 +203,20 @@ func transport(connections int) http.RoundTripper {
 // hot once the warmup is over. Requests sent during the warmup are discarded.
 func drive(client *http.Client, shape load, measureFrom time.Time, done *atomic.Bool, hot *samples) {
 	discard := newSamples()
+	session := shape.sessions()
 
 	for !done.Load() {
 		into := hot
 		if time.Now().Before(measureFrom) {
 			into = discard
 		}
-		request(context.Background(), client, shape, into)
+		request(context.Background(), client, shape, session(), into)
 	}
 }
 
-// request sends one request and records its outcome.
-func request(ctx context.Context, client *http.Client, shape load, into *samples) {
+// request sends one request, naming session unless it is empty, and records its
+// outcome.
+func request(ctx context.Context, client *http.Client, shape load, session string, into *samples) {
 	var body io.Reader
 	if shape.body != nil {
 		body = bytes.NewReader(shape.body)
@@ -202,8 +226,8 @@ func request(ctx context.Context, client *http.Client, shape load, into *samples
 		into.recordFailure("request")
 		return
 	}
-	if shape.keys > 0 {
-		attempt.Header.Set(sessionHeader, "session-"+strconv.Itoa(rand.IntN(shape.keys)))
+	if session != "" {
+		attempt.Header.Set(sessionHeader, session)
 	}
 
 	// Go's client sends an idempotent request again, on a new connection, when
