@@ -874,3 +874,82 @@ could only be guessed.
 | The clients over nine minutes | 21,291 answered 200, 180 answered 500, 16 POSTs refused with 503, 101 answers cut off against 100 `cut_off` counted by the balancer; 12 connection errors while the balancer's container was rebuilt part way |
 | Tests | the mock's metrics read back by Prometheus's parser; each reason produced by a real backend; reverting the deferred count, the `cut_off` path, the order of the checks or the counters prepared on reload each fails a test |
 | The whole suite with the race detector | green; `cmd/mockbackend` at 88.7%, `internal/proxy` at 96.9%, `internal/observability` at 99.0% |
+
+## Consistent hashing
+
+**Why.** A load balancer is expected to be able to keep a client on one backend, and until now this
+one could not: every strategy treated requests alike, and the design took backends to be stateless.
+The realistic mock backends made the question measurable — they remember sessions, and a session
+they do not remember costs 40 ms — so the answer could be a number rather than a claim.
+
+### What was built
+
+- **A fourth strategy, `consistent_hash`.** Weighted rendezvous hashing: every backend scores the
+  request's key, and the highest score serves it. With a balance factor, a backend already at that
+  percentage of its share of the requests in flight passes the key to the next in the key's order.
+  A request without a key is placed by the power of two choices.
+- **`KeyedStrategy`**, a second interface beside `LBStrategy`, so the other three strategies did not
+  change. The proxy reads the key once per request, from a header or the client's address, and a
+  retry, with the backends already tried left out, reaches the key's next choice.
+- **Configuration.** `consistent_hash.key` (`header:<Name>` or `client_ip`) and
+  `consistent_hash.balance_factor` (0, or at least 100), validated at load. A reload rebuilds the
+  strategy when either changes, not only when the algorithm does.
+- **`lb_hash_placements_total`**, by placement — home, overloaded, unavailable, keyless — counted on
+  first attempts only and created at zero; and a row on the Backends dashboard with the placements,
+  the share kept at home and the mocks' cache hit rate.
+- **The tools.** The console offers `consistent_hash` and its traffic now names 500 sessions; the
+  distribution it measures gives each request a session of its own. `loadgen -zipf` draws sessions
+  so that a few send most of the requests.
+
+### Decisions
+
+- **Rendezvous hashing** over a ring, jump hash and Maglev: exact weights, the fewest keys moved
+  when the pool changes, and nothing to rebuild. Its cost is a score per backend per request —
+  67 ns over ten backends, 8.4 µs over a thousand.
+- **A fixed hash**, FNV-1a with the SplitMix64 finalizer, not Go's per-process `maphash`: a key must
+  land on the same backend after a restart and from every balancer. A test pins a few placements.
+- **The key is read by the proxy, not the strategy.** The strategy stays a function of a key and
+  the backends it is offered, like the others, and health, the circuit breaker and retries narrow
+  that pool exactly as before.
+- **The bound off by default, 150 in the shipped configurations.** 125 was planned; the
+  measurement below chose 150.
+- **A cookie as the key is left to sticky sessions**, the next phase, where the balancer sets it.
+
+### What went wrong
+
+- **The bound cost more than expected on an unequal pool.** It reads load as requests in flight, and
+  the slow backend holds more of them for the same share of requests. With equal weights and a
+  factor of 125 it moved 35% of requests off their backend and brought the hit rate down to 68%;
+  the sessions it moved missed where they landed and slowed those backends in turn. 150 moved half
+  as many for a hit rate of 83%, and weights proportional to capacity did better than either.
+- **Ranking recomputed every score.** When a key's backend was at its bound, the sort computed two
+  scores per comparison: 332 µs over a thousand backends. Scoring once before sorting brought it to
+  40 µs, and keeping each backend's address hash after its first use took the common case from 100
+  to 67 ns over ten backends.
+- **A test of the bound had its arithmetic wrong.** Releasing a request at the key's backend also
+  lowers the total in flight, and the bound with it, so the backend was still full; the code was
+  right. The test now raises the rest of the pool instead.
+- **The console's traffic named no session.** Under `consistent_hash` every request it sent would
+  have been keyless and placed by load, and the demonstration would have shown nothing.
+- **A load generator test failed one run in thirty,** before any change here: the test's backend and
+  the generator each started their own clock for the end of the warm-up, and a timer that fired late
+  counted a measured request as warm-up. The backend now compares against a moment taken before the
+  generator's; sixty runs passed.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Distribution, 100,000 keys over ten backends | every backend within 5% of a tenth |
+| Weights 1 to 4 | each backend's share within 1% of all keys of its weight's share |
+| One of ten backends removed | not one of the other backends' keys moved |
+| An eleventh backend added | only keys it now wins moved, about an eleventh of them |
+| A key's order | its second choice the same whichever other backends are gone |
+| The bound | a key moves on when its backend is at its bound and stays when there is room; in 500 random pools the backend chosen always had room |
+| Through the proxy | the same key reaches the same backend; a failed attempt is retried on the key's second choice; placements counted home, overloaded, unavailable and keyless, first attempts only |
+| End to end | 40 sessions keep their backends; when one of four backends dies only its sessions move; a reload switches round robin to `consistent_hash`, and changing only the balance factor takes effect |
+| Mutations | reverting the reload condition, counting placements on every attempt, or preparing no counters on reload each fails a test |
+| Live, ten mocks remembering 5,000 of 30,000 sessions | hit rate 13.4% under round robin, 94.7% under consistent hashing; 580 against 1,099 requests a second; p50 58 against 21 ms |
+| Live, a backend killed | the survivors' hit rate 70% before, 73–74% after; no request failed |
+| Live, Zipf sessions | the busiest backend at 3.8 times the average in flight unbounded, 1.22 times at 125, with 24% more requests answered |
+| The whole suite with the race detector | green; `internal/balancer` at 99.3%, `internal/proxy` at 97.1% |
