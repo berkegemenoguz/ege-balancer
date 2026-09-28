@@ -57,6 +57,8 @@ type settings struct {
 	attempts   int
 	retryOn5xx bool
 	maxBody    int64
+	// hashKey reads what consistent hashing places a request by.
+	hashKey func(*http.Request) string
 }
 
 // New returns the handler that serves proxied traffic, with rate limiting and
@@ -130,6 +132,7 @@ func settingsFor(cfg *config.Config, strategy balancer.LBStrategy, backends []*b
 		attempts:   attemptsFor(cfg),
 		retryOn5xx: cfg.RetryOn5xx,
 		maxBody:    cfg.Limits.MaxRequestBodyBytes,
+		hashKey:    keyFor(cfg.ConsistentHash),
 	}
 }
 
@@ -198,9 +201,10 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	active.budget.requestStarted()
 	defer active.budget.requestFinished()
 
+	key := active.hashKey(r)
 	tried := make(map[string]bool, active.attempts)
 	for n := range active.attempts {
-		backend, err := active.strategy.Select(c.available(active, tried))
+		backend, err := c.choose(active, key, c.available(active, tried), n == 0)
 		if err != nil {
 			break
 		}
