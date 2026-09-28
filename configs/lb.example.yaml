@@ -6,7 +6,7 @@
 listen_addr: ":8080"
 metrics_addr: ":8081"       # /metrics, /status, /healthz and /readyz
 enable_pprof: false         # adds /debug/pprof to the metrics port
-algorithm: round_robin              # round_robin | least_connections | weighted_round_robin
+algorithm: round_robin              # round_robin | least_connections | weighted_round_robin | consistent_hash
 failure_policy: retry_next_backend  # retry_next_backend | fail_fast | circuit_breaker
 retry_on_5xx: false
 
@@ -14,6 +14,10 @@ retry:
   max_retries: 2
   budget_percent: 20          # retries in flight: at most this share of the requests in flight
   min_retry_concurrency: 3    # but always at least this many
+
+consistent_hash:            # read under algorithm: consistent_hash
+  key: header:X-Session     # header:<Name> | client_ip; requests without one are placed by load
+  balance_factor: 150       # no backend above 150% of its share of the requests in flight; 0 = unbounded
 
 circuit_breaker:
   failure_threshold: 5

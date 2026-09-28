@@ -23,6 +23,10 @@ retry:
   budget_percent: 20
   min_retry_concurrency: 3
 
+consistent_hash:            # read under algorithm: consistent_hash
+  key: header:X-Session     # header:<Name> | client_ip; requests without one are placed by load
+  balance_factor: 150       # no backend above 150% of its share of the requests in flight; 0 = unbounded
+
 circuit_breaker:
   failure_threshold: 5
   open_duration: 30s
