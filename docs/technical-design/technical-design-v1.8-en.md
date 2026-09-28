@@ -7,7 +7,7 @@
 | Author | Berk Egemen Oğuz |
 | Date | 11 September 2026 |
 | Version | 1.8 — supersedes v1.6 and the v1.7 revision notes |
-| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), the second measurement campaign against the profiled backends (§10.8), the three defects the realistic mock backends exposed, fixed in v1.3.1, and clients that give up being counted against the backends, fixed in v1.3.2 (§11.1) |
+| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), the second measurement campaign against the profiled backends (§10.8), the three defects the realistic mock backends exposed, fixed in v1.3.1, and clients that give up being counted against the backends, fixed in v1.3.2 (§11.1), and consistent hashing with bounded loads (§5.5, §10.9) |
 | Code | `github.com/berkegemenoguz/ege-balancer` |
 | Language | English. A Turkish edition with the same content is [technical-design-v1.8-tr.md](technical-design-v1.8-tr.md) |
 
@@ -39,7 +39,10 @@ throughput at its weakest backend: round robin sends 10% of the traffic to a bac
 capacity and refuses 3.6% of requests at 100 connections, where capacity-proportional weights and
 least connections each answer 72% more requests with none refused. We also show where least
 connections loses its signal — an overloaded backend that refuses instantly holds nothing in flight,
-and so looks idle.
+and so looks idle. Last, consistent hashing by weighted rendezvous hashing keeps a client on the
+backend that remembers it: against backends caching 5,000 of 30,000 sessions each, it raised the hit
+rate from 13% to 95% and the requests answered by 89% over round robin, and a bound on each
+backend's load held the busiest backend to 1.22 times the average under skewed traffic (§10.9).
 
 ---
 
@@ -140,8 +143,8 @@ backends answer in microseconds.
 ### 3.1 Functional goals
 
 - Distribute incoming HTTP requests across a pool of backends.
-- Three selection strategies, chosen in configuration: round robin, least connections and
-  weighted round robin.
+- Four selection strategies, chosen in configuration: round robin, least connections, weighted
+  round robin and, since v1.4.0, consistent hashing.
 - Active and passive health checking, removing an unhealthy backend and returning it once it
   recovers.
 - Configurable failure policies: retry on another backend, fail fast, or circuit breaking.
@@ -159,7 +162,8 @@ minimal non-root image, health endpoints, graceful shutdown, CI — not that a d
 
 - TLS termination, HTTP/2 and gRPC.
 - Distributed or multi-node balancing and service discovery.
-- Sticky sessions: backends are assumed stateless.
+- Sticky sessions by a cookie the balancer sets. Consistent hashing (§5.5) keeps a client on one
+  backend by a key the client itself sends.
 - A hand-written epoll event loop. The original design planned one as an optional learning
   exercise; it was not carried out, and nothing in the system depends on it (§4.3).
 
@@ -203,7 +207,7 @@ cmd/demo/                  local console for driving the demo stack (not part of
 cmd/mockbackend/           mock backend for the demo environment (not part of the image)
 internal/app/              wiring, shared by the binary and the integration tests
 internal/config/           parsing, defaults, validation, reload rules
-internal/balancer/         Backend, the LBStrategy interface and the three strategies
+internal/balancer/         Backend, the LBStrategy and KeyedStrategy interfaces, the four strategies
 internal/health/           active and passive health checking
 internal/proxy/            forwarding, failure policies, retry budget, rate limiting, validation
 internal/server/           listeners, connection cap, graceful shutdown
@@ -280,7 +284,8 @@ reload applies everything else and logs which of these it left alone.
 All strategies implement `LBStrategy`. The proxy core first narrows the pool to backends that are
 healthy, whose circuit is closed, and that this request has not tried yet; the strategy chooses
 among those. Keeping filtering out of the strategies keeps each strategy a pure function of the
-pool it is given.
+pool it is given. Consistent hashing also implements `KeyedStrategy`, which places a request by a
+key it carries (§5.5).
 
 ### 5.1 Round robin
 
@@ -363,6 +368,76 @@ strategy, set to a seeded generator in unit tests, so that a failing test can be
 **What does not change.** Filtering (health, circuit, already tried) happens before the strategy,
 so a sample can never land on an unfit backend. Weighted round robin and round robin are
 unaffected.
+
+### 5.5 Consistent hashing
+
+> **Status:** implemented after v1.3.2, for v1.4.0; §10.9 measures it.
+
+**Why.** The strategies above treat every request alike, which is right while backends keep
+nothing about their clients. When a backend does — a cache, a session, a warm connection to a
+shard — sending a client back to the same backend is worth something, and the realistic mock
+backends make that measurable: a request whose session the backend remembers skips a 40 ms miss
+penalty (§9.4). Placing a request by a hash of its key gives that affinity with no state at the
+balancer: the same key reaches the same backend from any balancer in front of the pool, and after a
+restart.
+
+**Configuration.** `algorithm: consistent_hash`, with `consistent_hash.key` saying what a request
+is placed by — `header:<Name>` for the value of a request header, or `client_ip` for the address it
+came from — and `consistent_hash.balance_factor` bounding the load (below). Backend weights apply.
+A request without a key is placed by the power of two choices (§5.4).
+
+**Algorithm: weighted rendezvous hashing.** Also called highest random weight [16]. For a key k and
+each candidate backend b of weight w:
+
+1. hash the key and the backend's address together into a uniform draw u in (0, 1);
+2. score the backend w / −ln u;
+3. the highest score serves the request.
+
+−ln u / w is an exponential variable of rate w, and the smallest of several independent ones falls
+on each backend with probability proportional to its weight, which is the logarithmic method of
+[17]; taking the largest reciprocal is the same choice. The hash is FNV-1a followed by the
+SplitMix64 finalizer. It is fixed rather than seeded per process, unlike Go's `hash/maphash`, so
+that a key's placement survives a restart and is shared by every balancer; a test pins the
+placement of a few keys, which makes any change to it deliberate.
+
+It has four properties the proxy relies on:
+
+- **Minimal disruption.** A backend that leaves takes only its own keys with it, and one that joins
+  takes only the keys it now scores highest on, an n+1-th of them in expectation. The tests check
+  this exactly: when one of ten backends is removed, not one of the other keys moves.
+- **Failover and retries for free.** The proxy narrows the pool before any strategy chooses (§5),
+  so a key whose backend is unhealthy, tripped or already tried goes to its second-highest score —
+  the same backend every time, for every request with that key.
+- **Exact weights.** A backend of weight 3 wins three times the keys of one of weight 1, within the
+  binomial spread.
+- **No state.** Nothing is built or stored, so a reload or a change of health has nothing to rebuild.
+
+The alternatives each give up one of these. A hash ring [18] needs a hundred or more virtual nodes
+per backend to balance, and a structure to rebuild when the pool changes. Jump consistent hash [19]
+is fast and needs no memory, but supports neither weights nor the removal of any backend other than
+the last, which health checking does all the time. Maglev hashing [20] looks up in O(1) from a
+table, but a change moves more keys than it must. The price of rendezvous hashing is a score per
+backend on every request: 67 ns over ten backends, 0.53 µs over a hundred and 8.4 µs over a
+thousand (§10.4), against the tens of backends this balancer is built for (§3.2).
+
+**Bounded load.** A popular key sends all its requests to one backend. With a balance factor c,
+in per cent, a backend of weight w may serve at most ⌈c/100 · (m+1) · w/W⌉ requests at once, where
+m is the number in flight across the candidates and W their total weight; a key whose backend is
+at its bound goes to the next backend in its order that is not. The bounds add up to at least m+1,
+so some backend always has room. This is consistent hashing with bounded loads [21], as HAProxy's
+`hash-balance-factor` and Envoy's `hash_balance_factor` implement it. It is off by default, as in
+both. The shipped configurations set 150, which on the unequal pool of §9.4 measured better than 125
+on every count (§10.9).
+
+The bound reads load as requests in flight, and a slower backend holds more of them for the same
+rate of requests (Little's law [12]). With equal weights over unequal backends, the bound therefore
+takes a slow backend for an overloaded one and moves its keys away, at a cost in affinity. Weights
+proportional to capacity scale each backend's bound with it, and remove most of that cost.
+
+**Observability.** `lb_hash_placements_total` counts where each request was placed: `home`, on the
+backend its key belongs to; `overloaded`, past a home at its bound; `unavailable`, past a home out of
+the pool; `keyless`, by load. Only first attempts are counted. The Backends dashboard shows the
+placements, the share of keyed requests kept at home and the mock backends' cache hit rate.
 
 ---
 
@@ -786,6 +861,8 @@ system and network stack, not from the balancer's code.
 | Round robin, 10 and 100 backends | 1.9 ns, 1.8 ns | none |
 | Least connections, 10, 100 and 1,000 backends | 14 ns at every size | none |
 | Weighted round robin, 10 and 100 backends | 177 ns, 1.95 µs | none |
+| Consistent hashing with a key, 10, 100 and 1,000 backends | 67 ns, 0.53 µs, 8.4 µs | none |
+| Consistent hashing, the key's backend at its bound, 10 backends | 0.22 µs | 160 B, 1 |
 | RR, LC, WRR with 10 goroutines | 36 ns, 2.8 ns, 274 ns | none |
 | Health lookup, alone and alongside reports | 7.6 ns, 35 ns | none |
 | Rate limiter, one client and many | 12 ns, 102 ns | none |
@@ -936,6 +1013,71 @@ either weighted round robin or least connections. Passive health checking is wha
 three consecutive failed attempts remove the backend, and at these rates three failures take
 milliseconds, where the active probe would have needed up to six seconds.
 
+### 10.9 Consistent hashing against backends that remember
+
+**Setup.** The ten profiled backends of §9.4 ran on the host, each remembering 5,000 sessions, with
+a miss costing 40 ms; hangs, drops, pauses and cold starts were off. The generator held 40
+connections, and every request named one of 30,000 sessions in `X-Session` — more than one backend
+can remember, fewer than the pool can. Before each run with uniform sessions the caches were
+cleared; 90 seconds of warm-up were discarded and 30 measured. There was one run per
+configuration, not three: the effects below are many times the few per cent that separated
+repeated runs in §10.8, and differences as small as that are not claimed.
+
+**Hypotheses, written before measuring.**
+
+1. Round robin sends every session to every backend, so each backend remembers about a sixth of
+   what it is asked for, a hit rate near 17%. Consistent hashing gives each backend about 3,000
+   sessions, which fit, so the hit rate approaches 100%, and with it the 40 ms of every miss goes.
+2. When a backend is lost, only its sessions move, and the others keep their hit rate.
+3. Under skewed sessions, a balance factor of 125 keeps the busiest backend near 1.25 times the
+   average in flight, for a small loss of hit rate.
+
+**Uniform sessions.**
+
+| Configuration | Answered | p50 | p99 | Hit rate | Moved by the bound |
+| --- | --- | --- | --- | --- | --- |
+| round robin | 580 req/s | 58.1 ms | 264.5 ms | 13.4% | — |
+| consistent hashing, unbounded | 1,099 req/s | 21.4 ms | 241.4 ms | 94.7% | none |
+| consistent hashing, 150 | 1,178 req/s | 21.6 ms | 181.0 ms | 83.4% | 18% |
+| consistent hashing, 125 | 1,000 req/s | 28.4 ms | 181.8 ms | 67.9% | 35% |
+| consistent hashing, 125, weights by capacity | 1,302 req/s | 20.5 ms | 130.5 ms | 81.4% | 18% |
+
+The first hypothesis holds. Keeping each session on one backend raised the hit rate from 13% to 95%,
+took the miss penalty off most requests, cut the median from 58 to 21 ms, and let the same
+connections carry 89% more requests. The hit rate falls short of 100% because a session seen for
+the first time in the window misses once; round robin's falls short of 17% because two minutes did
+not fill its caches.
+
+What the hypotheses did not foresee is the bound's cost on an unequal pool. The bound reads load
+as requests in flight, and the slow backend, answering in 80 ms where the fast ones take 15, holds
+more of them for the same share of requests. With equal weights the bound took it for an overloaded
+backend: at 125 it moved 35% of requests off their backend, the slow one ended with 3.5% of the
+traffic instead of 10%, and the sessions moved missed where they landed, which made those backends
+slower in turn. At 150 the bound moved half as many and kept the hit rate at 83%, with more
+throughput and a shorter tail than no bound at all. Weights proportional to capacity — 4 for the
+fast backends, 2 for the medium, 1 for the slow, as in §10.8 — gave the most throughput and the
+shortest tail of all. The shipped configurations, whose weights are equal, set 150 accordingly.
+
+**A backend lost.** With the caches warm and a bound of 125, backend-4 was killed ten seconds into a
+run. The survivors' hit rate was 70% before and 73–74% after, and no request failed: the second
+hypothesis holds. Only backend-4's sessions moved, each to the same next backend every time.
+
+**Skewed sessions.** The same 30,000 sessions drawn from a Zipf distribution of exponent 1.1,
+where the most popular session alone sends 14% of the requests and the hundred most popular 61%;
+10 seconds of warm-up and 30 measured, with the caches as the previous run left them.
+
+| Configuration | Answered | p99 | Hit rate | Busiest backend in flight |
+| --- | --- | --- | --- | --- |
+| consistent hashing, unbounded | 1,098 req/s | 253.8 ms | 96.9% | 3.81 × the average |
+| consistent hashing, 125 | 1,366 req/s | 159.0 ms | 92.9% | 1.22 × |
+| consistent hashing, 150 | 1,395 req/s | 169.5 ms | 95.3% | 1.44 × |
+| consistent hashing, 125, weights by capacity | 1,646 req/s | 114.3 ms | 96.2% | 1.51 ×, on a backend of weight 4 |
+
+The third hypothesis holds. Unbounded, the busiest backend held 3.8 times the average in flight; at
+125 it held 1.22 times, within its bound, for four points of hit rate, 24% more requests answered and
+a p99 37% lower. With weights by capacity the busiest backend is a fast one whose bound is larger,
+and the pool answered half as many requests again as without a bound.
+
 ---
 
 ## 11. Discussion
@@ -1040,7 +1182,8 @@ CI runners vary by several per cent, which is why only bytes and allocations are
   would let the power of two choices be measured where it overtakes the scan (§10.7).
 - **Single node.** Rate limits, circuit state and the retry budget are per process; several balancer
   instances would each enforce their own.
-- **No sticky sessions.** Backends must be stateless.
+- **No cookie affinity.** Consistent hashing keeps a client on its backend only by a key the client
+  sends itself (§5.5). Sessions kept by a cookie the balancer sets are planned for v1.5.0.
 - **Log shipping and alerting** (Loki, Alertmanager) were deferred from v1.0 and are still absent.
 - **A real deployment** on a free cloud tier, with a public demo, is still a possible next step.
 
@@ -1048,7 +1191,7 @@ CI runners vary by several per cent, which is why only bytes and allocations are
 
 ## 13. Conclusion
 
-Ege-Balancer meets the goals set for it: three strategies, health checking, configurable failure
+Ege-Balancer meets the goals set for it: four strategies, health checking, configurable failure
 policies, reload without dropped connections, and observability, in a 22.6 MB non-root image,
 serving about 41,000 requests per second with no failed request on a machine it shared with its own
 load (§10.3) — and, against backends with real latencies and capacities, keeping the pool's weakest
@@ -1089,6 +1232,18 @@ bottlenecks and all three post-release additions came from measurement, not spec
     length.
 14. `benchstat`, `golang.org/x/perf/cmd/benchstat`. https://pkg.go.dev/golang.org/x/perf/cmd/benchstat
 15. Prometheus and Grafana documentation. https://prometheus.io/docs/, https://grafana.com/docs/
+16. D. G. Thaler, C. V. Ravishankar. *Using Name-Based Mappings to Increase Hit Rates.* IEEE/ACM
+    Transactions on Networking, 6(1):1–14, 1998. Rendezvous (highest random weight) hashing.
+17. C. Schindelhauer, G. Schomaker. *Weighted Distributed Hash Tables.* Proceedings of the 17th ACM
+    Symposium on Parallelism in Algorithms and Architectures (SPAA), 2005.
+18. D. Karger, E. Lehman, T. Leighton, R. Panigrahy, M. Levine, D. Lewin. *Consistent Hashing and
+    Random Trees.* Proceedings of the 29th ACM Symposium on Theory of Computing (STOC), 1997.
+19. J. Lamping, E. Veach. *A Fast, Minimal Memory, Consistent Hash Algorithm.* arXiv:1406.2294,
+    2014.
+20. D. E. Eisenbud et al. *Maglev: A Fast and Reliable Software Network Load Balancer.* 13th USENIX
+    Symposium on Networked Systems Design and Implementation (NSDI), 2016.
+21. V. Mirrokni, M. Thorup, M. Zadimoghaddam. *Consistent Hashing with Bounded Loads.* Proceedings
+    of the 29th ACM-SIAM Symposium on Discrete Algorithms (SODA), 2018.
 
 ---
 
@@ -1098,9 +1253,13 @@ bottlenecks and all three post-release additions came from measurement, not spec
 listen_addr: ":8080"                # traffic; restart to change
 metrics_addr: ":8081"               # /metrics, /status, /healthz, /readyz, pprof; restart to change
 enable_pprof: false                 # restart to change
-algorithm: round_robin              # round_robin | least_connections | weighted_round_robin
+algorithm: round_robin              # round_robin | least_connections | weighted_round_robin | consistent_hash
 failure_policy: retry_next_backend  # retry_next_backend | fail_fast | circuit_breaker
 retry_on_5xx: false                 # count a 5xx answer as a failed attempt
+
+consistent_hash:                    # read under consistent_hash
+  key: header:X-Session             # header:<Name> | client_ip; required under consistent_hash
+  balance_factor: 150               # bound on each backend's load, in per cent of its share; 0 = none
 
 retry:
   max_retries: 2                    # at least 1 under retry_next_backend
@@ -1113,7 +1272,7 @@ circuit_breaker:                    # required under circuit_breaker
 
 backends:
   - addr: "backend-1:5678"          # host:port, unique
-    weight: 1                       # weighted round robin only; omitted means 1
+    weight: 1                       # weighted round robin and consistent hashing; omitted means 1
 
 health_check:
   path: "/healthz"
@@ -1438,6 +1597,25 @@ cause, and the balancer's the effect. The mocks' metrics are written with the st
 rather than the Prometheus client, so the mock stays a program without dependencies, and a test
 reads them back with Prometheus's own parser. Listing the reasons is also what found the defect
 fixed in v1.3.2 (§11.1).
+
+### B.18 A fourth strategy places requests by key
+
+*v1.6 §3.3, §5 · after v1.3.2 · §5.5, §10.9*
+
+**v1.6.** Three strategies — round robin, least connections and weighted round robin — with sticky
+sessions out of scope and backends assumed stateless.
+
+**Instead.** A fourth strategy, `consistent_hash`, places each request by a key it carries — a
+header or the client's address — with weighted rendezvous hashing, and optionally bounds each
+backend's load. It implements a second interface, `KeyedStrategy`, beside `LBStrategy`, so the
+other strategies are unchanged; a request without a key is placed by the power of two choices.
+
+**Why.** Real backends are rarely stateless — caches, sessions and warm connections make the
+backend that served a client the cheapest one to serve it again — and a load balancer that cannot
+keep a client on one backend leaves that saving unclaimed. The mock backends gained a memory
+(entry 13) so that the saving could be measured rather than asserted. Rendezvous hashing was chosen
+over a ring, jump hash and Maglev for exact weights, minimal disruption and the absence of any state
+to rebuild (§5.5); the bound, because a single popular key would otherwise overload one backend.
 
 ### Not carried out: the epoll exercise
 

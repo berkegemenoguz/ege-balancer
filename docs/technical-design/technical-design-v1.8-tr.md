@@ -7,7 +7,7 @@
 | Yazar | Berk Egemen Oğuz |
 | Tarih | 11 Eylül 2026 |
 | Sürüm | 1.8 — v1.6'nın ve v1.7 revizyon notlarının yerini alır |
-| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2), profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8), gerçekçi mock backend'lerin ortaya çıkarıp v1.3.1'de düzeltilen üç hata ve v1.3.2'de düzeltilen, vazgeçen istemcilerin backend'lerin hanesine yazılması (§11.1) |
+| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2), profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8), gerçekçi mock backend'lerin ortaya çıkarıp v1.3.1'de düzeltilen üç hata ve v1.3.2'de düzeltilen, vazgeçen istemcilerin backend'lerin hanesine yazılması (§11.1) ve sınırlı yüklü consistent hashing (§5.5, §10.9) |
 | Kod | `github.com/berkegemenoguz/ege-balancer` |
 | Dil | Türkçe. Aynı içerikteki İngilizce sürüm: [technical-design-v1.8-en.md](technical-design-v1.8-en.md) |
 
@@ -39,7 +39,11 @@ throughput'u en zayıf backend ile sınırlar: round robin trafiğin %10'unu kap
 eden bir backend'e gönderir ve 100 bağlantıda isteklerin %3,6'sını reddeder; aynı noktada kapasiteye
 oranlı ağırlıklar ve least connections %72 daha fazla isteği hiç ret vermeden cevaplar. Least
 connections'ın sinyalini nerede yitirdiğini de gösteriyoruz: anında reddeden aşırı yüklü bir backend
-uçuşta hiçbir istek tutmadığı için boşta görünür.
+uçuşta hiçbir istek tutmadığı için boşta görünür. Son olarak ağırlıklı rendezvous hashing ile
+consistent hashing, bir istemciyi onu hatırlayan backend'de tutar: her biri 30.000 oturumun
+5.000'ini önbelleğe alan backend'lere karşı isabet oranını %13'ten %95'e, cevaplanan istekleri round
+robin'e göre %89 artırdı; her backend'in yüküne konan bir sınır da çarpık trafikte en meşgul
+backend'i ortalamanın 1,22 katında tuttu (§10.9).
 
 ---
 
@@ -142,8 +146,8 @@ least connections'ın dengeleyecek bir şeyi kalmaması.
 ### 3.1 Fonksiyonel hedefler
 
 - Gelen HTTP isteklerini bir backend havuzuna dağıtmak.
-- Yapılandırmadan seçilen üç seçim stratejisi: round robin, least connections ve weighted round
-  robin.
+- Yapılandırmadan seçilen dört seçim stratejisi: round robin, least connections, weighted round
+  robin ve v1.4.0'dan itibaren consistent hashing.
 - Aktif ve pasif sağlık kontrolü: sağlıksız bir backend'i çıkarmak, iyileşince geri almak.
 - Yapılandırılabilir hata stratejileri: başka bir backend'de yeniden denemek, hemen hata dönmek ya
   da devre kesmek.
@@ -162,7 +166,8 @@ var olduğunu değil.
 
 - TLS sonlandırma, HTTP/2 ve gRPC.
 - Dağıtık ya da çok düğümlü dengeleme ve servis keşfi.
-- Sticky session: backend'lerin durumsuz olduğu varsayılır.
+- Yük dengeleyicinin koyduğu bir cookie ile sticky session. Consistent hashing (§5.5) bir istemciyi,
+  istemcinin kendisinin gönderdiği bir anahtarla tek bir backend'de tutar.
 - Elle yazılmış bir epoll olay döngüsü. Özgün tasarım bunu opsiyonel bir öğrenme egzersizi olarak
   planlamıştı; yapılmadı ve sistemde hiçbir şey ona bağlı değil (§4.3).
 
@@ -206,7 +211,7 @@ cmd/demo/                  demo ortamını yönetmek için yerel konsol (imaja d
 cmd/mockbackend/           demo ortamı için mock backend (imaja dahil değil)
 internal/app/              kurulum (wiring); binary ve entegrasyon testleri ortak kullanır
 internal/config/           ayrıştırma, varsayılanlar, doğrulama, yenileme kuralları
-internal/balancer/         Backend, LBStrategy arayüzü ve üç strateji
+internal/balancer/         Backend, LBStrategy ve KeyedStrategy arayüzleri, dört strateji
 internal/health/           aktif ve pasif sağlık kontrolü
 internal/proxy/            iletme, hata stratejileri, retry budget, hız sınırlama, doğrulama
 internal/server/           listener'lar, bağlantı sınırı, graceful shutdown
@@ -283,7 +288,8 @@ yenileme geri kalan her şeyi uygular ve bunlardan hangilerine dokunmadığını
 Tüm stratejiler `LBStrategy`'yi gerçekler. Proxy çekirdeği önce havuzu sağlıklı, devresi kapalı ve
 bu isteğin henüz denemediği backend'lere daraltır; strateji bunlar arasından seçer. Filtrelemenin
 stratejilerin dışında tutulması, her stratejiyi kendisine verilen havuzun saf bir fonksiyonu olarak
-bırakır.
+bırakır. Consistent hashing ayrıca, bir isteği taşıdığı bir anahtara göre yerleştiren
+`KeyedStrategy`'yi de gerçekler (§5.5).
 
 ### 5.1 Round robin
 
@@ -366,6 +372,80 @@ alanıdır ve birim testlerinde tohumlanmış bir üreteçle kurulur, böylece b
 **Neler değişmez.** Filtreleme (sağlık, devre, daha önce denenmiş olma) stratejiden önce yapılır;
 dolayısıyla bir örnek hiçbir zaman uygun olmayan bir backend'e düşemez. Weighted round robin ve
 round robin etkilenmez.
+
+### 5.5 Consistent hashing
+
+> **Durum:** v1.3.2'den sonra, v1.4.0 için gerçekleştirildi; §10.9 onu ölçer.
+
+**Neden.** Yukarıdaki stratejiler her isteğe aynı davranır; backend'ler istemcileri hakkında hiçbir
+şey tutmadığı sürece doğrusu da budur. Bir backend bir şey tuttuğunda — bir önbellek, bir oturum,
+bir shard'a sıcak bir bağlantı — bir istemciyi aynı backend'e geri göndermenin bir değeri olur ve
+gerçekçi mock backend'ler bunu ölçülebilir kılar: backend'in oturumunu hatırladığı bir istek 40
+ms'lik ıska cezasını atlar (§9.4). Bir isteği anahtarının hash'ine göre yerleştirmek bu yakınlığı
+yük dengeleyicide hiçbir durum tutmadan sağlar: aynı anahtar, havuzun önündeki her yük
+dengeleyiciden ve yeniden başlatmadan sonra da aynı backend'e ulaşır.
+
+**Yapılandırma.** `algorithm: consistent_hash`; `consistent_hash.key` bir isteğin neye göre
+yerleştirildiğini söyler — bir istek başlığının değeri için `header:<Ad>`, isteğin geldiği adres için
+`client_ip` — ve `consistent_hash.balance_factor` yükü sınırlar (aşağıda). Backend ağırlıkları
+geçerlidir. Anahtarı olmayan bir istek power of two choices ile yerleştirilir (§5.4).
+
+**Algoritma: ağırlıklı rendezvous hashing.** Highest random weight olarak da bilinir [16]. Bir k
+anahtarı ve ağırlığı w olan her aday backend b için:
+
+1. anahtar ile backend'in adresi birlikte hash'lenip (0, 1) aralığında düzgün bir u çekilişine
+   çevrilir;
+2. backend'e w / −ln u puanı verilir;
+3. en yüksek puan isteği karşılar.
+
+−ln u / w, w oranlı üstel bir değişkendir ve birkaç bağımsız üstel değişkenin en küçüğü her
+backend'e ağırlığıyla orantılı bir olasılıkla düşer; bu [17]'deki logaritmik yöntemdir, en büyük
+tersini almak aynı seçimdir. Hash, FNV-1a ve ardından SplitMix64'ün son karıştırma adımıdır. Go'nun
+`hash/maphash`'inden farklı olarak süreç başına tohumlanmaz, sabittir; böylece bir anahtarın
+yerleşimi yeniden başlatmadan sonra da korunur ve her yük dengeleyici tarafından paylaşılır. Bir test
+birkaç anahtarın yerleşimini sabitler; böylece onu değiştirmek bilinçli bir karar olur.
+
+Proxy'nin dayandığı dört özelliği vardır:
+
+- **En az taşıma.** Ayrılan bir backend yalnızca kendi anahtarlarını götürür, katılan bir backend
+  yalnızca artık en yüksek puanı aldığı anahtarları alır; beklenen değer olarak n+1'de biri. Testler
+  bunu tam olarak denetler: on backend'den biri çıkarıldığında diğer anahtarların hiçbiri taşınmaz.
+- **Bedava failover ve retry.** Proxy havuzu, herhangi bir strateji seçmeden önce daraltır (§5);
+  dolayısıyla backend'i sağlıksız, devresi açık ya da zaten denenmiş bir anahtar ikinci en yüksek
+  puanına gider — o anahtarı taşıyan her istek için her seferinde aynı backend'e.
+- **Tam ağırlıklar.** Ağırlığı 3 olan bir backend, ağırlığı 1 olanın üç katı anahtar kazanır;
+  binom dağılımının saçılımı içinde.
+- **Durum yok.** Hiçbir şey kurulmaz ya da saklanmaz; bir yenileme ya da sağlık değişikliğinde
+  yeniden kurulacak bir şey yoktur.
+
+Alternatiflerin her biri bunlardan birinden vazgeçer. Bir hash halkası [18] dengeli dağıtmak için
+backend başına yüz ya da daha fazla sanal düğüm ve havuz değiştiğinde yeniden kurulacak bir yapı
+ister. Jump consistent hash [19] hızlıdır ve bellek istemez, ama ne ağırlıkları ne de sonuncusu
+dışında bir backend'in çıkarılmasını destekler; sağlık kontrolü ise bunu sürekli yapar. Maglev
+hashing [20] bir tablodan O(1) arar, ama bir değişiklik gerekenden fazla anahtar taşır. Rendezvous
+hashing'in bedeli her istekte backend başına bir puandır: on backend'de 67 ns, yüzde 0,53 µs ve
+binde 8,4 µs (§10.4); bu yük dengeleyicinin hedeflediği onlarca backend karşısında (§3.2).
+
+**Sınırlı yük.** Popüler bir anahtar bütün isteklerini tek bir backend'e gönderir. Yüzde olarak bir
+c denge faktörüyle, ağırlığı w olan bir backend aynı anda en fazla ⌈c/100 · (m+1) · w/W⌉ istek
+karşılayabilir; burada m adaylar genelinde uçuştaki istek sayısı, W ise toplam ağırlıklarıdır.
+Backend'i sınırında olan bir anahtar, sırasında sınırında olmayan bir sonraki backend'e gider.
+Sınırların toplamı en az m+1 olduğu için her zaman yeri olan bir backend vardır. Bu, HAProxy'nin
+`hash-balance-factor`'ı ve Envoy'un `hash_balance_factor`'ı gibi, sınırlı yüklü consistent
+hashing'dir [21]. İkisinde olduğu gibi varsayılan olarak kapalıdır. Dağıtılan yapılandırmalar 150
+kullanır; bu değer §9.4'ün eşit olmayan havuzunda her ölçütte 125'ten iyi çıktı (§10.9).
+
+Sınır yükü uçuştaki istek sayısı olarak okur ve daha yavaş bir backend aynı istek hızında daha fazla
+isteği uçuşta tutar (Little yasası [12]). Eşit olmayan backend'ler üzerinde eşit ağırlıklarla sınır
+bu yüzden yavaş bir backend'i aşırı yüklü sanar ve anahtarlarını başka yere taşır; bunun bedeli
+yakınlıktır. Kapasiteyle orantılı ağırlıklar her backend'in sınırını kapasitesiyle birlikte ölçekler
+ve bu bedelin çoğunu ortadan kaldırır.
+
+**Gözlemlenebilirlik.** `lb_hash_placements_total` her isteğin nereye yerleştirildiğini sayar:
+`home`, anahtarının ait olduğu backend'e; `overloaded`, sınırındaki bir evin ötesine; `unavailable`,
+havuz dışındaki bir evin ötesine; `keyless`, yüke göre. Yalnızca ilk denemeler sayılır. Backends
+dashboard'u yerleşimleri, anahtarlı isteklerin evde kalan payını ve mock backend'lerin önbellek
+isabet oranını gösterir.
 
 ---
 
@@ -795,6 +875,8 @@ yığınından gelir.
 | Round robin, 10 ve 100 backend | 1,9 ns, 1,8 ns | yok |
 | Least connections, 10, 100 ve 1.000 backend | her boyutta 14 ns | yok |
 | Weighted round robin, 10 ve 100 backend | 177 ns, 1,95 µs | yok |
+| Anahtarlı consistent hashing, 10, 100 ve 1.000 backend | 67 ns, 0,53 µs, 8,4 µs | yok |
+| Consistent hashing, anahtarın backend'i sınırında, 10 backend | 0,22 µs | 160 B, 1 |
 | 10 goroutine ile RR, LC, WRR | 36 ns, 2,8 ns, 274 ns | yok |
 | Sağlık sorgusu, tek başına ve raporlarla birlikte | 7,6 ns, 35 ns | yok |
 | Hız sınırlayıcı, tek istemci ve çok istemci | 12 ns, 102 ns | yok |
@@ -945,6 +1027,72 @@ least connections altında istemci hiçbir hata görmedi. Bunu ucuz kılan şey 
 üst üste üç başarısız deneme backend'i havuzdan çıkarır ve bu hızlarda üç hata milisaniyeler sürer;
 aktif probe'un fark etmesi altı saniyeye kadar sürebilirdi.
 
+### 10.9 Hatırlayan backend'lere karşı consistent hashing
+
+**Düzenek.** §9.4'ün on profilli backend'i makinenin kendisinde çalıştı; her biri 5.000 oturum
+hatırlıyordu ve bir ıska 40 ms'ye mal oluyordu. Takılma, düşme, duraklama ve soğuk başlangıç
+kapalıydı. Üreteç 40 bağlantı tuttu ve her istek `X-Session`'da 30.000 oturumdan birini adlandırdı —
+tek bir backend'in hatırlayabileceğinden fazla, havuzun hatırlayabileceğinden az. Düzgün oturumlu her
+koşudan önce önbellekler temizlendi; 90 saniyelik ısınma atıldı, 30 saniye ölçüldü. Her yapılandırma
+üç kez değil bir kez koşuldu: aşağıdaki etkiler, §10.8'de tekrarlanan koşuları ayıran birkaç yüzdenin
+çok katıdır ve o kadar küçük farklar iddia edilmez.
+
+**Ölçmeden önce yazılan hipotezler.**
+
+1. Round robin her oturumu her backend'e gönderir; her backend kendisinden istenenin yaklaşık
+   altıda birini hatırlar, isabet oranı %17 civarında olur. Consistent hashing her backend'e yaklaşık
+   3.000 oturum verir, bunlar sığar; isabet oranı %100'e yaklaşır ve her ıskanın 40 ms'si de gider.
+2. Bir backend kaybedildiğinde yalnızca onun oturumları taşınır, diğerleri isabet oranlarını korur.
+3. Çarpık oturumlarda 125'lik bir denge faktörü en meşgul backend'i uçuştaki isteklerde ortalamanın
+   1,25 katı civarında tutar; bedeli isabet oranında küçük bir kayıptır.
+
+**Düzgün oturumlar.**
+
+| Yapılandırma | Cevaplanan | p50 | p99 | İsabet oranı | Sınırın taşıdığı |
+| --- | --- | --- | --- | --- | --- |
+| round robin | 580 istek/s | 58,1 ms | 264,5 ms | %13,4 | — |
+| consistent hashing, sınırsız | 1.099 istek/s | 21,4 ms | 241,4 ms | %94,7 | hiç |
+| consistent hashing, 150 | 1.178 istek/s | 21,6 ms | 181,0 ms | %83,4 | %18 |
+| consistent hashing, 125 | 1.000 istek/s | 28,4 ms | 181,8 ms | %67,9 | %35 |
+| consistent hashing, 125, kapasiteye göre ağırlıklar | 1.302 istek/s | 20,5 ms | 130,5 ms | %81,4 | %18 |
+
+İlk hipotez tutar. Her oturumu tek bir backend'de tutmak isabet oranını %13'ten %95'e çıkardı, ıska
+cezasını isteklerin çoğunun üzerinden kaldırdı, medyanı 58'den 21 ms'ye indirdi ve aynı bağlantıların
+%89 daha fazla istek taşımasını sağladı. İsabet oranı %100'ün altında kalır, çünkü pencerede ilk kez
+görülen bir oturum bir kez ıskalar; round robin'inki %17'nin altında kalır, çünkü iki dakika
+önbelleklerini doldurmadı.
+
+Hipotezlerin öngörmediği şey, sınırın eşit olmayan bir havuzdaki bedelidir. Sınır yükü uçuştaki istek
+olarak okur ve hızlıların 15 ms'de cevapladığı yerde 80 ms'de cevaplayan yavaş backend, aynı istek
+payı için bunlardan daha fazlasını tutar. Eşit ağırlıklarla sınır onu aşırı yüklü bir backend sandı:
+125'te isteklerin %35'ini backend'lerinden taşıdı, yavaş backend trafiğin %10'u yerine %3,5'iyle
+kaldı ve taşınan oturumlar vardıkları yerde ıskaladı; bu da o backend'leri sırayla yavaşlattı. 150'de
+sınır bunun yarısını taşıdı ve isabet oranını %83'te tuttu; sınırsızdan daha fazla throughput ve
+daha kısa bir kuyrukla. Kapasiteyle orantılı ağırlıklar — §10.8'deki gibi hızlılar için 4, ortalar
+için 2, yavaş için 1 — hepsinden fazla throughput'u ve en kısa kuyruğu verdi. Ağırlıkları eşit olan
+dağıtılan yapılandırmalar buna göre 150 kullanır.
+
+**Bir backend kaybı.** Önbellekler sıcakken ve sınır 125'teyken backend-4 bir koşunun onuncu
+saniyesinde öldürüldü. Hayatta kalanların isabet oranı önce %70, sonra %73–74'tü ve hiçbir istek
+başarısız olmadı: ikinci hipotez tutar. Yalnızca backend-4'ün oturumları taşındı; her biri her
+seferinde aynı sonraki backend'e.
+
+**Çarpık oturumlar.** Aynı 30.000 oturum, üssü 1,1 olan bir Zipf dağılımından çekildi; en popüler
+oturum tek başına isteklerin %14'ünü, en popüler yüzü %61'ini gönderir. 10 saniye ısınma ve 30
+saniye ölçüm; önbellekler bir önceki koşunun bıraktığı gibiydi.
+
+| Yapılandırma | Cevaplanan | p99 | İsabet oranı | En meşgul backend, uçuşta |
+| --- | --- | --- | --- | --- |
+| consistent hashing, sınırsız | 1.098 istek/s | 253,8 ms | %96,9 | ortalamanın 3,81 katı |
+| consistent hashing, 125 | 1.366 istek/s | 159,0 ms | %92,9 | 1,22 katı |
+| consistent hashing, 150 | 1.395 istek/s | 169,5 ms | %95,3 | 1,44 katı |
+| consistent hashing, 125, kapasiteye göre ağırlıklar | 1.646 istek/s | 114,3 ms | %96,2 | 1,51 katı, ağırlığı 4 olan bir backend'de |
+
+Üçüncü hipotez tutar. Sınırsızken en meşgul backend uçuşta ortalamanın 3,8 katını tuttu; 125'te,
+sınırının içinde, 1,22 katını; karşılığında isabet oranından dört puan verdi, %24 daha fazla istek
+cevaplandı ve p99 %37 düştü. Kapasiteye göre ağırlıklarla en meşgul backend, sınırı daha büyük olan
+hızlılardan biridir ve havuz sınırsız haline göre bir buçuk kat istek cevapladı.
+
 ---
 
 ## 11. Tartışma
@@ -1053,7 +1201,9 @@ bu yüzden yalnızca bayt ve bellek ayırma sayıları kapı olarak kullanılır
   power of two choices'ın taramayı geçtiği yerde ölçülmesini sağlar (§10.7).
 - **Tek düğüm.** Hız sınırları, devre durumu ve retry budget süreç başınadır; birkaç yük dengeleyici
   örneğinin her biri kendi sınırını uygular.
-- **Sticky session yok.** Backend'ler durumsuz olmalıdır.
+- **Cookie ile yakınlık yok.** Consistent hashing bir istemciyi backend'inde yalnızca istemcinin
+  kendisinin gönderdiği bir anahtarla tutar (§5.5). Yük dengeleyicinin koyduğu bir cookie ile
+  tutulan oturumlar v1.5.0 için planlanmıştır.
 - **Log toplama ve uyarılar** (Loki, Alertmanager) v1.0 sonrasına ertelenmişti ve hâlâ yok.
 - **Gerçek bir dağıtım**, ücretsiz bir bulut katmanında ve herkese açık bir demoyla, hâlâ olası bir
   sonraki adımdır.
@@ -1062,7 +1212,7 @@ bu yüzden yalnızca bayt ve bellek ayırma sayıları kapı olarak kullanılır
 
 ## 13. Sonuç
 
-Ege-Balancer kendisi için konan hedefleri karşılar: üç strateji, sağlık kontrolü, yapılandırılabilir
+Ege-Balancer kendisi için konan hedefleri karşılar: dört strateji, sağlık kontrolü, yapılandırılabilir
 hata stratejileri, bağlantı düşürmeden yenileme ve gözlemlenebilirlik; 22,6 MB'lık, root olmayan
 bir imajda, kendi yüküyle paylaştığı bir makinede hiçbir isteği başarısız olmadan saniyede yaklaşık
 41.000 istek karşılar. Daha kalıcı sonuç ise yöntemdir. Her karar verilmeden önce yazıya döküldü;
@@ -1102,6 +1252,18 @@ sonrası üç ekleme spekülasyondan değil ölçümden geldi.
     uzunluğu.
 14. `benchstat`, `golang.org/x/perf/cmd/benchstat`. https://pkg.go.dev/golang.org/x/perf/cmd/benchstat
 15. Prometheus ve Grafana belgeleri. https://prometheus.io/docs/, https://grafana.com/docs/
+16. D. G. Thaler, C. V. Ravishankar. *Using Name-Based Mappings to Increase Hit Rates.* IEEE/ACM
+    Transactions on Networking, 6(1):1–14, 1998. Rendezvous (highest random weight) hashing.
+17. C. Schindelhauer, G. Schomaker. *Weighted Distributed Hash Tables.* Proceedings of the 17th ACM
+    Symposium on Parallelism in Algorithms and Architectures (SPAA), 2005.
+18. D. Karger, E. Lehman, T. Leighton, R. Panigrahy, M. Levine, D. Lewin. *Consistent Hashing and
+    Random Trees.* Proceedings of the 29th ACM Symposium on Theory of Computing (STOC), 1997.
+19. J. Lamping, E. Veach. *A Fast, Minimal Memory, Consistent Hash Algorithm.* arXiv:1406.2294,
+    2014.
+20. D. E. Eisenbud et al. *Maglev: A Fast and Reliable Software Network Load Balancer.* 13th USENIX
+    Symposium on Networked Systems Design and Implementation (NSDI), 2016.
+21. V. Mirrokni, M. Thorup, M. Zadimoghaddam. *Consistent Hashing with Bounded Loads.* Proceedings
+    of the 29th ACM-SIAM Symposium on Discrete Algorithms (SODA), 2018.
 
 ---
 
@@ -1111,9 +1273,13 @@ sonrası üç ekleme spekülasyondan değil ölçümden geldi.
 listen_addr: ":8080"                # trafik; değiştirmek için yeniden başlatın
 metrics_addr: ":8081"               # /metrics, /status, /healthz, /readyz, pprof; yeniden başlatma gerekir
 enable_pprof: false                 # yeniden başlatma gerekir
-algorithm: round_robin              # round_robin | least_connections | weighted_round_robin
+algorithm: round_robin              # round_robin | least_connections | weighted_round_robin | consistent_hash
 failure_policy: retry_next_backend  # retry_next_backend | fail_fast | circuit_breaker
 retry_on_5xx: false                 # 5xx yanıtı başarısız deneme say
+
+consistent_hash:                    # consistent_hash altında okunur
+  key: header:X-Session             # header:<Ad> | client_ip; consistent_hash altında zorunlu
+  balance_factor: 150               # her backend'in yükü için, payının yüzdesi olarak sınır; 0 = yok
 
 retry:
   max_retries: 2                    # retry_next_backend altında en az 1
@@ -1126,7 +1292,7 @@ circuit_breaker:                    # circuit_breaker altında zorunlu
 
 backends:
   - addr: "backend-1:5678"          # host:port, benzersiz
-    weight: 1                       # yalnızca weighted round robin; yazılmazsa 1
+    weight: 1                       # weighted round robin ve consistent hashing; yazılmazsa 1
 
 health_check:
   path: "/healthz"
@@ -1449,6 +1615,27 @@ ama doğrulanamaz; backend'in kendi sayımı nedeni, yük dengeleyicininki sonuc
 metrikleri Prometheus istemcisi yerine standart kütüphaneyle yazılır; böylece mock bağımlılıksız
 bir program olarak kalır ve bir test onları Prometheus'un kendi ayrıştırıcısıyla geri okur.
 Nedenleri listelemek, v1.3.2'de düzeltilen hatayı da bulan şeydi (§11.1).
+
+### B.18 Dördüncü bir strateji istekleri anahtara göre yerleştirir
+
+*v1.6 §3.3, §5 · v1.3.2'den sonra · §5.5, §10.9*
+
+**v1.6.** Üç strateji — round robin, least connections ve weighted round robin — ve kapsam dışında
+bırakılmış sticky session'lar; backend'lerin durumsuz olduğu varsayılır.
+
+**Bunun yerine.** Dördüncü bir strateji, `consistent_hash`, her isteği taşıdığı bir anahtara — bir
+başlık ya da istemcinin adresi — göre ağırlıklı rendezvous hashing ile yerleştirir ve isteğe bağlı
+olarak her backend'in yükünü sınırlar. `LBStrategy`'nin yanında ikinci bir arayüz, `KeyedStrategy`'yi
+gerçekler; böylece diğer stratejiler değişmez. Anahtarı olmayan bir istek power of two choices ile
+yerleştirilir.
+
+**Neden.** Gerçek backend'ler nadiren durumsuzdur — önbellekler, oturumlar ve sıcak bağlantılar bir
+istemciye hizmet etmiş backend'i onu yeniden karşılamanın en ucuz yolu yapar — ve bir istemciyi tek
+bir backend'de tutamayan bir yük dengeleyici bu kazancı alamaz. Mock backend'lere bir bellek
+eklendi (13. madde), böylece bu kazanç iddia edilmek yerine ölçülebildi. Rendezvous hashing; tam
+ağırlıklar, en az taşıma ve yeniden kurulacak hiçbir durumun olmaması için halka, jump hash ve
+Maglev'e tercih edildi (§5.5); sınır ise tek bir popüler anahtar aksi halde bir backend'i aşırı
+yükleyeceği için eklendi.
 
 ### Yapılmayan: epoll deneyi
 
