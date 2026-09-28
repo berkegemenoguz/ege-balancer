@@ -7,12 +7,13 @@ backends leave the pool on their own and come back when they recover, failures a
 policy you choose, and the whole system can be watched through structured logs, Prometheus metrics
 and Grafana dashboards.
 
-> Status: v1.3.2. The twelve day plan was released as v1.0.0, and the releases since have added a
+> Status: v1.4.0. The twelve day plan was released as v1.0.0, and the releases since have added a
 > retry budget and least connections by the power of two choices (v1.1.0); liveness and readiness
 > endpoints, a container health check, profiled mock backends and three Grafana dashboards
 > (v1.2.0); a retry rule for requests that are not idempotent, with an identifier on every request
-> (v1.3.0); fixes for three defects that realistic mock backends exposed (v1.3.1); and a fix for
-> clients that give up being counted against the backends (v1.3.2). Everything below is implemented
+> (v1.3.0); fixes for three defects that realistic mock backends exposed (v1.3.1); a fix for
+> clients that give up being counted against the backends (v1.3.2); and consistent hashing with
+> bounded loads, failure reasons and a Faults dashboard (v1.4.0). Everything below is implemented
 > and tested, except where *Out of scope* says otherwise.
 
 ## Contents
@@ -32,10 +33,13 @@ and Grafana dashboards.
 
 ## Features
 
-- **Three load balancing algorithms**, chosen in configuration: round robin; least connections,
+- **Four load balancing algorithms**, chosen in configuration: round robin; least connections,
   which sends each request to the less busy of two backends drawn at random, so its cost does not
-  grow with the pool and idle backends share the traffic; and smooth weighted round robin, which
-  spreads a heavy backend's turns across the cycle rather than bunching them together
+  grow with the pool and idle backends share the traffic; smooth weighted round robin, which
+  spreads a heavy backend's turns across the cycle rather than bunching them together; and
+  consistent hashing, which keeps every request with the same key — a header such as `X-Session`,
+  or the client's address — on the same backend, moves as few keys as it can when the pool changes,
+  and can bound each backend's load so that a popular key cannot overload one
 - **Health checking**, active and passive: a periodic HTTP probe and the outcome of real traffic
   feed the same thresholds, so a backend leaves the pool as soon as either shows it failing
 - **Failure policies**: `retry_next_backend` (never twice to the same backend), `fail_fast`, and
@@ -50,7 +54,7 @@ and Grafana dashboards.
 - **Configuration reload on SIGHUP** without dropping a connection; an invalid file is refused and
   the balancer keeps running on what it had
 - **Observability**: structured logs carrying a request identifier, Prometheus metrics, a JSON
-  status endpoint, liveness and readiness endpoints, optional profiling endpoints, and three
+  status endpoint, liveness and readiness endpoints, optional profiling endpoints, and four
   Grafana dashboards
 - **Shipped as a container**: a 22.6 MB distroless image running as a non-root user, published on
   every tag
@@ -59,7 +63,8 @@ and Grafana dashboards.
 
 - TLS termination and HTTP/2 — the balancer speaks plain HTTP
 - Distributed or multi-node balancing, and service discovery
-- Sticky sessions — backends are assumed stateless
+- Sticky sessions by a cookie the balancer sets — consistent hashing keeps a client on one backend
+  by a key the client sends itself
 
 ## Requirements
 
@@ -298,6 +303,14 @@ in flight may be retries, and `retry.min_retry_concurrency` (default 3) are alwa
 light traffic can still be retried. A retry the budget refuses is answered with 503 and counted as
 `retry_budget_exhausted`.
 
+Under `consistent_hash`, `consistent_hash.key` says what places a request: `header:<Name>` for the
+value of a request header, or `client_ip` for the address it came from. A request without one is
+placed like least connections. Backend weights apply, and a backend that is unhealthy, or already
+tried, passes its keys to the same next backend every time. `consistent_hash.balance_factor` bounds
+each backend at that percentage of its share of the requests in flight; 0 leaves the load unbounded.
+The section may be present under any algorithm, as the shipped configurations have it, and is only
+read under its own.
+
 A request that is not idempotent — POST, PATCH, or a method the balancer does not know — is retried
 only while nothing can have acted on it, which means the connection to the backend was never made.
 Once the request is on the wire the backend may have carried it out and answered into a connection
@@ -352,7 +365,7 @@ with four linked dashboards in an *Ege-Balancer* folder:
 | Dashboard | What it shows |
 | --- | --- |
 | [Overview](http://localhost:3000/d/ege-balancer) | requests, error-free share, p99, healthy backends and reloads at a glance; request rate and share of traffic per backend; latency; a health timeline |
-| [Backends](http://localhost:3000/d/ege-balancer-backends) | a sortable table per backend, share of traffic, requests in flight averaged over a window, p95 latency per backend, a latency heatmap |
+| [Backends](http://localhost:3000/d/ege-balancer-backends) | a sortable table per backend, share of traffic, requests in flight averaged over a window, p95 latency per backend, a latency heatmap; where consistent hashing placed requests, the share kept at home and the cache hit rate |
 | [Resilience](http://localhost:3000/d/ege-balancer-resilience) | answers by status class, refusals by reason, retries against the budget, failed attempts, health and reloads |
 | [Faults](http://localhost:3000/d/ege-balancer-faults) | a fault followed from the backend to the client: faults in force, what the mock backends did instead of answering, their workers, queues, cold starts and caches; failed attempts by reason and backend; what clients received, answers cut off included |
 
@@ -394,6 +407,21 @@ Round robin is not misbehaving — an equal share is what it promises — but an
 unequal pool saturates the weakest backend first. Least connections reaches the same distribution as
 capacity-proportional weights without being told anything about capacity.
 
+**What consistent hashing is worth.** The same backends, each remembering 5,000 sessions and paying
+40 ms for one it does not, with 30,000 sessions sent from 40 connections, one run each:
+
+| Algorithm | Answered | p50 | p99 | Cache hit rate |
+| --- | --- | --- | --- | --- |
+| round robin | 580 req/s | 58.1 ms | 264.5 ms | 13.4% |
+| consistent hashing, unbounded | 1,099 req/s | 21.4 ms | 241.4 ms | 94.7% |
+| consistent hashing, balance factor 150 | 1,178 req/s | 21.6 ms | 181.0 ms | 83.4% |
+
+With a few sessions sending most of the requests, a balance factor of 125 held the busiest backend
+to 1.22 times the average in flight, against 3.8 times unbounded, and answered 24% more requests.
+The bound counts requests in flight, which a slow backend holds more of, so it works best with
+weights proportional to capacity: that combination answered the most requests in every run. The
+details are in §10.9 of the technical design.
+
 The [performance report](docs/performance-report.md) has both campaigns in full: the method, all
 fifty-four runs across six load levels, what happens when a backend is stopped or crashed mid-run,
 where least connections loses its signal, and why the client's p95 at 2,000 connections says more
@@ -408,7 +436,7 @@ cmd/mockbackend/           mock backend with profiles, memory, faults and an adm
 cmd/loadgen/               load generator behind the performance report
 internal/app/              wiring, shared by the binary and the integration tests
 internal/config/           configuration parsing, defaults, validation and reload rules
-internal/balancer/         Backend, the LBStrategy interface and the three algorithms
+internal/balancer/         Backend, the LBStrategy and KeyedStrategy interfaces, the four algorithms
 internal/health/           active and passive health checking
 internal/proxy/            forwarding, failure policies, retry budget, rate limiting, validation
 internal/server/           listeners, connection limit and graceful shutdown

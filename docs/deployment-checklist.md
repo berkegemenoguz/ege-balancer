@@ -48,6 +48,9 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
 - [ ] `timeouts.response_timeout` is also shorter than the clients' own timeouts: a backend that
       hangs is counted as failing only when the response timeout expires, and a client that gives up
       first is not counted against it
+- [ ] Under `consistent_hash`, the key is one every client sends — requests without it are placed
+      by load — and the weights follow the backends' capacity, since the balance factor bounds
+      requests in flight, which a slower backend holds more of
 - [ ] `failure_policy` matches the priority: `retry_next_backend` for availability, `fail_fast`
       for latency, `circuit_breaker` to protect a struggling backend
 - [ ] Under `retry_next_backend`, `retry.budget_percent` is the extra load the backends can take
