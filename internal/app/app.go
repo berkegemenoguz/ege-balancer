@@ -6,7 +6,9 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	"github.com/berkegemenoguz/ege-balancer/internal/balancer"
@@ -17,9 +19,22 @@ import (
 	"github.com/berkegemenoguz/ege-balancer/internal/server"
 )
 
+// StickySecretEnv names the environment variable holding the key sticky
+// cookies are signed with. It is kept out of the configuration file, which is
+// meant to be committed and shared.
+const StickySecretEnv = "LB_STICKY_SECRET"
+
+// minStickySecret is the shortest secret accepted: a short one could be found
+// by trying every candidate against a cookie a client was given, and then used
+// to sign a cookie for any backend.
+const minStickySecret = 32
+
 // App is an assembled load balancer with its sockets already bound.
 type App struct {
 	configPath string
+	// secretGiven records whether sticky cookies are signed with a secret from
+	// the environment, rather than one made for this process.
+	secretGiven bool
 
 	traffic *server.Server
 	admin   *server.Server
@@ -50,9 +65,18 @@ func New(cfg *config.Config, configPath string) (*App, error) {
 
 	metrics := observability.NewMetrics()
 	pool := observability.NewPool(strategy.Name(), backends, checker)
+	pool.SetSticky(string(cfg.Sticky.Mode))
 	metrics.Register(pool)
 
-	handler := proxy.New(cfg, strategy, backends, checker, metrics)
+	secret, err := stickySecret()
+	if err != nil {
+		return nil, err
+	}
+	var options []proxy.Option
+	if secret != nil {
+		options = append(options, proxy.WithStickySecret(secret))
+	}
+	handler := proxy.New(cfg, strategy, backends, checker, metrics, options...)
 
 	traffic, err := server.New(cfg, handler)
 	if err != nil {
@@ -65,17 +89,20 @@ func New(cfg *config.Config, configPath string) (*App, error) {
 		return nil, err
 	}
 
+	warnOfUnsharedPins(cfg, secret != nil)
+
 	return &App{
-		configPath: configPath,
-		traffic:    traffic,
-		admin:      admin,
-		checker:    checker,
-		handler:    handler,
-		pool:       pool,
-		probes:     probes,
-		metrics:    metrics,
-		cfg:        cfg,
-		backends:   backends,
+		configPath:  configPath,
+		secretGiven: secret != nil,
+		traffic:     traffic,
+		admin:       admin,
+		checker:     checker,
+		handler:     handler,
+		pool:        pool,
+		probes:      probes,
+		metrics:     metrics,
+		cfg:         cfg,
+		backends:    backends,
 	}, nil
 }
 
@@ -96,6 +123,9 @@ func (a *App) Reload(ctx context.Context) error {
 	for _, warning := range next.Warnings() {
 		slog.Warn("configuration", "warning", warning)
 	}
+	if a.cfg.Sticky.Mode != config.StickyCookie {
+		warnOfUnsharedPins(next, a.secretGiven)
+	}
 	if fixed := a.cfg.RequiresRestart(next); len(fixed) > 0 {
 		slog.Warn("some settings need a restart and were not applied", "settings", fixed)
 	}
@@ -115,6 +145,7 @@ func (a *App) Reload(ctx context.Context) error {
 	a.handler.Reload(next, strategy, backends)
 	a.checker.Reload(ctx, next.HealthCheck, backends)
 	a.pool.Reload(strategy.Name(), backends)
+	a.pool.SetSticky(string(next.Sticky.Mode))
 
 	a.cfg, a.backends = next, backends
 	a.metrics.ObserveReload("applied")
@@ -122,6 +153,30 @@ func (a *App) Reload(ctx context.Context) error {
 		"algorithm", strategy.Name(), "backends", len(backends),
 		"failure_policy", next.FailurePolicy)
 	return nil
+}
+
+// stickySecret reads the secret sticky cookies are signed with from the
+// environment. It returns nil when none is set, and an error for one too short
+// to be safe.
+func stickySecret() ([]byte, error) {
+	secret := os.Getenv(StickySecretEnv)
+	if secret == "" {
+		return nil, nil
+	}
+	if len(secret) < minStickySecret {
+		return nil, fmt.Errorf("%s must be at least %d characters", StickySecretEnv, minStickySecret)
+	}
+	return []byte(secret), nil
+}
+
+// warnOfUnsharedPins warns when sticky cookies are on and signed with a secret
+// made for this process: they will not survive a restart, and no other
+// balancer will accept them.
+func warnOfUnsharedPins(cfg *config.Config, secretGiven bool) {
+	if cfg.Sticky.Mode == config.StickyCookie && !secretGiven {
+		slog.Warn("sticky cookies are signed with a secret made at start; they will not survive a restart "+
+			"or be accepted by another balancer", "set", StickySecretEnv)
+	}
 }
 
 // Addr is the address serving proxied traffic.
