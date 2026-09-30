@@ -19,6 +19,12 @@ consistent_hash:            # read under algorithm: consistent_hash
   key: header:X-Session     # header:<Name> | client_ip; requests without one are placed by load
   balance_factor: 150       # no backend above 150% of its share of the requests in flight; 0 = unbounded
 
+sticky:                     # keep a client on its backend by a cookie the balancer sets
+  mode: none                # none | cookie; cookies are signed with the LB_STICKY_SECRET variable
+  cookie: lb_backend
+  max_age: 0s               # 0 = until the browser closes
+  secure: false             # true behind something that terminates TLS
+
 circuit_breaker:
   failure_threshold: 5
   open_duration: 30s
