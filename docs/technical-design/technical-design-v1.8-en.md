@@ -7,7 +7,7 @@
 | Author | Berk Egemen Oğuz |
 | Date | 11 September 2026 |
 | Version | 1.8 — supersedes v1.6 and the v1.7 revision notes |
-| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), the second measurement campaign against the profiled backends (§10.8), the three defects the realistic mock backends exposed, fixed in v1.3.1, and clients that give up being counted against the backends, fixed in v1.3.2 (§11.1), and consistent hashing with bounded loads (§5.5, §10.9) |
+| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), the second measurement campaign against the profiled backends (§10.8), the three defects the realistic mock backends exposed, fixed in v1.3.1, and clients that give up being counted against the backends, fixed in v1.3.2 (§11.1), consistent hashing with bounded loads (§5.5, §10.9), and sticky sessions by a signed cookie (§5.6, §10.10) |
 | Code | `github.com/berkegemenoguz/ege-balancer` |
 | Language | English. A Turkish edition with the same content is [technical-design-v1.8-tr.md](technical-design-v1.8-tr.md) |
 
@@ -43,6 +43,9 @@ and so looks idle. Last, consistent hashing by weighted rendezvous hashing keeps
 backend that remembers it: against backends caching 5,000 of 30,000 sessions each, it raised the hit
 rate from 13% to 95% and the requests answered by 89% over round robin, and a bound on each
 backend's load held the busiest backend to 1.22 times the average under skewed traffic (§10.9).
+Sticky sessions by a signed cookie matched it on round robin without the client sending any key; and
+where consistent hashing moved an eleventh of the sessions to a backend that joined, sticky sessions
+moved none, leaving the new backend nearly idle (§10.10).
 
 ---
 
@@ -145,6 +148,8 @@ backends answer in microseconds.
 - Distribute incoming HTTP requests across a pool of backends.
 - Four selection strategies, chosen in configuration: round robin, least connections, weighted
   round robin and, since v1.4.0, consistent hashing.
+- Since v1.5.0, sticky sessions: a cookie the balancer sets keeps a client on the backend that
+  first answered it, whatever the strategy.
 - Active and passive health checking, removing an unhealthy backend and returning it once it
   recovers.
 - Configurable failure policies: retry on another backend, fail fast, or circuit breaking.
@@ -162,8 +167,6 @@ minimal non-root image, health endpoints, graceful shutdown, CI — not that a d
 
 - TLS termination, HTTP/2 and gRPC.
 - Distributed or multi-node balancing and service discovery.
-- Sticky sessions by a cookie the balancer sets. Consistent hashing (§5.5) keeps a client on one
-  backend by a key the client itself sends.
 - A hand-written epoll event loop. The original design planned one as an optional learning
   exercise; it was not carried out, and nothing in the system depends on it (§4.3).
 
@@ -439,6 +442,55 @@ backend its key belongs to; `overloaded`, past a home at its bound; `unavailable
 the pool; `keyless`, by load. Only first attempts are counted. The Backends dashboard shows the
 placements, the share of keyed requests kept at home and the mock backends' cache hit rate.
 
+### 5.6 Sticky sessions
+
+> **Status:** implemented for v1.5.0; §10.10 measures it.
+
+**Why, beside consistent hashing.** Consistent hashing places a client by a key the client sends,
+and a browser sends none. Sticky sessions let the balancer give it one. Under `sticky.mode: cookie`,
+the first request of a client is placed by the configured strategy, whichever it is, and the answer
+carries a cookie naming the backend that gave it; later requests carrying the cookie go to that
+backend for as long as it can take them.
+
+**The cookie.** Its value is the first 128 bits of an HMAC-SHA256 of the backend's address under a
+secret, in unpadded base64url. It names the backend without giving the address away, and a client
+without the secret cannot make the value for a backend it was never sent to; it can only send back
+one it was given. The values of the whole pool are computed when a configuration is applied, so a
+request costs a map lookup and no cryptography. The cookie is `HttpOnly`, `SameSite=Lax` and scoped
+to `/`; `Secure` when `sticky.secure` is set, which only makes sense behind something that
+terminates TLS; and kept until the browser closes unless `sticky.max_age` says otherwise. It is
+taken off the request before the request is forwarded, as HAProxy's `cookie … indirect` does [8],
+leaving the client's other cookies byte for byte as they were.
+
+**The secret** comes from the environment variable `LB_STICKY_SECRET`, at least 32 characters long,
+so that the configuration file, which is meant to be committed, holds none. Without it the balancer
+makes one when it starts and warns: its pins then last as long as the process, and no other
+balancer honours them. Balancers given the same secret honour each other's cookies, and a reload
+keeps the secret.
+
+**When a pin breaks.**
+
+| The cookie | The request goes | The answer |
+| --- | --- | --- |
+| names a backend among the candidates | to that backend | sets no cookie |
+| is absent | where the strategy places it | pins the client there |
+| names a backend out of the pool — unhealthy, tripped, removed by a reload | where the strategy places it | pins the client there |
+| names a backend whose attempt then fails | to a retry, as any failed attempt | pins the client to the backend that answered |
+| names no backend of the pool — forged, signed with another secret, or stale | where the strategy places it | pins the client there |
+
+**No bound on load.** Moving a pinned client moves its session, and a bound that moved clients as
+load rose would take away what the pin is for. HAProxy's cookie persistence likewise ignores load
+and redispatches only on failure. What tells the balancer a pinned backend cannot take a request is
+what every strategy already has: health checking, the circuit breaker, a failed attempt and, under
+`retry_on_5xx`, a 5xx. A bound belongs with consistent hashing, where it is the balance factor.
+
+**With consistent hashing,** a pin outranks the key: the cookie says where the client's session is,
+the key only where it would be placed.
+
+**Observability.** `lb_sticky_requests_total` counts what the cookie did for each request —
+`pinned`, `new`, `repinned` or `unknown` — on first attempts only. `/status` reports the mode, and
+the Backends dashboard the results and the share of requests with a cookie kept on their backend.
+
 ---
 
 ## 6. Failure handling
@@ -589,6 +641,11 @@ layer.
   the check is repeated so the proxy does not depend on it.
 - **Forwarding headers.** `X-Forwarded-For` and related headers are rewritten, not appended to, so a
   client cannot forge the address a backend sees.
+- **The sticky cookie** (§5.6) names a backend by an HMAC of its address, so it gives no address away
+  and a client cannot make one for a backend it was never sent to. It is `HttpOnly` and
+  `SameSite=Lax`, `Secure` when configured, and taken off the request before it reaches a backend.
+  The secret comes from the environment, never the configuration file, and must be at least 32
+  characters.
 - **Separate observability port.** `/metrics`, `/status`, `/healthz`, `/readyz` and the optional
   pprof endpoints are served on `metrics_addr`, never on the traffic port. pprof is off by default because it exposes heap and
   goroutine state.
@@ -611,6 +668,8 @@ layer.
 | `lb_config_reloads_total` | counter | result | reloads applied or rejected |
 | `lb_backend_active_connections` | gauge | backend | requests in flight, read at scrape time |
 | `lb_backend_healthy` | gauge | backend | 1 healthy, 0 not, read at scrape time |
+| `lb_hash_placements_total` | counter | placement | where consistent hashing placed a request (§5.5) |
+| `lb_sticky_requests_total` | counter | result | what a sticky cookie did for a request (§5.6) |
 
 The two gauges are read from the live state when Prometheus scrapes, rather than mirrored into
 separate variables, so there is no second copy of the state to drift.
@@ -626,9 +685,10 @@ nothing, so a backend that went down once would show no failures. The reason was
 
 ### 8.2 Status, logs and profiling
 
-`/status` answers a person rather than a scraper: the algorithm, the healthy count, the number of
-reloads applied, and each backend's weight, health and in-flight count. Logs are structured JSON
-(or text) through `log/slog`. `/debug/pprof` is available on the metrics port when enabled.
+`/status` answers a person rather than a scraper: the algorithm, the sticky mode, the healthy count,
+the number of reloads applied, and each backend's weight, health and in-flight count. Logs are
+structured JSON (or text) through `log/slog`. `/debug/pprof` is available on the metrics port when
+enabled.
 
 Every request carries an identifier, which ties those logs to the backend's own. It is taken from
 the client's `X-Request-Id` when that is printable ASCII of at most 64 characters — so a trace that
@@ -1078,6 +1138,48 @@ The third hypothesis holds. Unbounded, the busiest backend held 3.8 times the av
 a p99 37% lower. With weights by capacity the busiest backend is a fast one whose bound is larger,
 and the pool answered half as many requests again as without a bound.
 
+### 10.10 Sticky sessions against consistent hashing
+
+**Setup.** As in §10.9: ten profiled backends on the host, 5,000 sessions remembered each, a miss
+costing 40 ms, 30,000 uniform sessions from 40 connections, caches cleared before each run, one run
+per configuration. With `loadgen -cookies` every session keeps the cookies it is given, so the
+balancer sees 30,000 browsers. The generator holds the cookies, so each warm-up and the event that
+follows it happen in one run; a second run would arrive with none.
+
+**Hypotheses, written before measuring.**
+
+1. Round robin with sticky cookies reaches the hit rate of consistent hashing: each session's first
+   request lands anywhere, and every later one where the first did.
+2. When a backend joins, consistent hashing moves an eleventh of the sessions to it, and the hit
+   rate dips while they miss there; sticky sessions move none, so the hit rate does not dip, but the
+   new backend receives only sessions it has never seen, which after the warm-up are almost none.
+3. When a backend dies, sticky sessions re-pin only its sessions.
+
+**Results.**
+
+| Configuration | Answered | p50 | p99 | Hit rate |
+| --- | --- | --- | --- | --- |
+| round robin with sticky cookies | 1,110 req/s | 21.2 ms | 240.9 ms | 94.7% |
+| consistent hashing, unbounded (§10.9) | 1,099 req/s | 21.4 ms | 241.4 ms | 94.7% |
+
+| An eleventh backend joins by a reload | Hit rate before; in the 3 s after; in the 22 s after that | Requests the new backend took |
+| --- | --- | --- |
+| consistent hashing, unbounded | 94.3%, 88.0%, 92.0% | 9.1% |
+| round robin with sticky cookies | 94.5%, 96.9%, 97.5% | 0.4% |
+
+All three hypotheses hold. With a cookie, round robin kept every session where it began and matched
+consistent hashing on every figure, without the client sending a key. The difference shows when the
+pool changes. Consistent hashing gave the new backend 9.1% of the requests — an eleventh is 9.09% —
+and paid for it with a dip of six points while those sessions missed there. Sticky sessions paid
+nothing and moved nothing, and the new backend stood nearly idle, with 0.4% of the requests: it gets
+a share only as new clients arrive or old pins break. Neither is wrong: one balances the pool at
+once, the other keeps every session warm.
+
+When backend-4 was killed part way through a sticky run, 1,559 requests found their backend gone and
+were re-pinned, and no request failed. The survivors' hit rate went from 93.3% before to 85.9% in
+the next three seconds and 90.5% in the twenty after: their own sessions kept their pins, and the dip
+is the moved sessions missing once where they landed.
+
 ---
 
 ## 11. Discussion
@@ -1182,8 +1284,10 @@ CI runners vary by several per cent, which is why only bytes and allocations are
   would let the power of two choices be measured where it overtakes the scan (§10.7).
 - **Single node.** Rate limits, circuit state and the retry budget are per process; several balancer
   instances would each enforce their own.
-- **No cookie affinity.** Consistent hashing keeps a client on its backend only by a key the client
-  sends itself (§5.5). Sessions kept by a cookie the balancer sets are planned for v1.5.0.
+- **Sticky sessions do not rebalance.** A backend added to the pool receives only clients it has not
+  seen, 0.4% of the requests in §10.10, until pins break. Consistent hashing moves its share at once,
+  at a cost in hit rate. A pin that expires, through `sticky.max_age`, is one way to let the pool
+  even out over time.
 - **Log shipping and alerting** (Loki, Alertmanager) were deferred from v1.0 and are still absent.
 - **A real deployment** on a free cloud tier, with a public demo, is still a possible next step.
 
@@ -1261,6 +1365,12 @@ consistent_hash:                    # read under consistent_hash
   key: header:X-Session             # header:<Name> | client_ip; required under consistent_hash
   balance_factor: 150               # bound on each backend's load, in per cent of its share; 0 = none
 
+sticky:
+  mode: none                        # none | cookie
+  cookie: lb_backend                # the cookie's name
+  max_age: 0s                       # 0 keeps it until the browser closes
+  secure: false                     # true behind something that terminates TLS
+
 retry:
   max_retries: 2                    # at least 1 under retry_next_backend
   budget_percent: 20                # retries in flight: at most this share of requests in flight
@@ -1299,7 +1409,9 @@ logging:
 ```
 
 Defaults are applied for `metrics_addr`, `response_timeout`, `budget_percent`,
-`min_retry_concurrency`, backend weights and logging. Unknown fields are errors. Everything not
+`min_retry_concurrency`, backend weights, the sticky mode and cookie, and logging. Unknown fields are
+errors. The secret sticky cookies are signed with is not a field: it is read from the environment
+variable `LB_STICKY_SECRET`, at least 32 characters, and made at start when it is not set. Everything not
 marked "restart to change" is applied by `SIGHUP`.
 
 A `response_timeout` that is not shorter than `write_timeout` is accepted but logged as a warning, at
@@ -1616,6 +1728,23 @@ keep a client on one backend leaves that saving unclaimed. The mock backends gai
 (entry 13) so that the saving could be measured rather than asserted. Rendezvous hashing was chosen
 over a ring, jump hash and Maglev for exact weights, minimal disruption and the absence of any state
 to rebuild (§5.5); the bound, because a single popular key would otherwise overload one backend.
+
+### B.19 Sticky sessions by a signed cookie
+
+*v1.6 §3.3 · after v1.4.0 · §5.6, §7, §10.10*
+
+**v1.6.** Sticky sessions out of scope: backends are assumed stateless.
+
+**Instead.** An opt-in `sticky` section keeps a client on the backend that first answered it, by a
+cookie the balancer sets, over whichever strategy is configured. The cookie names the backend by an
+HMAC of its address, is taken off the request before forwarding, and is signed with a secret read
+from the environment.
+
+**Why.** Consistent hashing (entry 18) needs the client to send a key, and a browser sends none; the
+balancer can give it one. Signing keeps the cookie from telling clients the pool's addresses or
+letting them choose a backend; reading the secret from the environment keeps it out of a
+configuration file that is committed. The cookie ignores load, as HAProxy's does, because moving a
+pinned client moves its session.
 
 ### Not carried out: the epoll exercise
 

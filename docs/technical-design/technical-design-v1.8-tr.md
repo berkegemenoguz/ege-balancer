@@ -7,7 +7,7 @@
 | Yazar | Berk Egemen Oğuz |
 | Tarih | 11 Eylül 2026 |
 | Sürüm | 1.8 — v1.6'nın ve v1.7 revizyon notlarının yerini alır |
-| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2), profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8), gerçekçi mock backend'lerin ortaya çıkarıp v1.3.1'de düzeltilen üç hata ve v1.3.2'de düzeltilen, vazgeçen istemcilerin backend'lerin hanesine yazılması (§11.1) ve sınırlı yüklü consistent hashing (§5.5, §10.9) |
+| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2), profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8), gerçekçi mock backend'lerin ortaya çıkarıp v1.3.1'de düzeltilen üç hata ve v1.3.2'de düzeltilen, vazgeçen istemcilerin backend'lerin hanesine yazılması (§11.1) sınırlı yüklü consistent hashing (§5.5, §10.9) ve imzalı bir cookie ile sticky session (§5.6, §10.10) |
 | Kod | `github.com/berkegemenoguz/ege-balancer` |
 | Dil | Türkçe. Aynı içerikteki İngilizce sürüm: [technical-design-v1.8-en.md](technical-design-v1.8-en.md) |
 
@@ -43,7 +43,10 @@ uçuşta hiçbir istek tutmadığı için boşta görünür. Son olarak ağırl�
 consistent hashing, bir istemciyi onu hatırlayan backend'de tutar: her biri 30.000 oturumun
 5.000'ini önbelleğe alan backend'lere karşı isabet oranını %13'ten %95'e, cevaplanan istekleri round
 robin'e göre %89 artırdı; her backend'in yüküne konan bir sınır da çarpık trafikte en meşgul
-backend'i ortalamanın 1,22 katında tuttu (§10.9).
+backend'i ortalamanın 1,22 katında tuttu (§10.9). İmzalı bir cookie ile sticky session, istemci
+hiçbir anahtar göndermeden round robin üzerinde onu yakaladı; ve consistent hashing katılan bir
+backend'e oturumların on birde birini taşırken sticky session hiçbirini taşımadı ve yeni backend'i
+neredeyse boşta bıraktı (§10.10).
 
 ---
 
@@ -148,6 +151,8 @@ least connections'ın dengeleyecek bir şeyi kalmaması.
 - Gelen HTTP isteklerini bir backend havuzuna dağıtmak.
 - Yapılandırmadan seçilen dört seçim stratejisi: round robin, least connections, weighted round
   robin ve v1.4.0'dan itibaren consistent hashing.
+- v1.5.0'dan itibaren sticky session: yük dengeleyicinin koyduğu bir cookie, strateji ne olursa
+  olsun, bir istemciyi ona ilk cevap veren backend'de tutar.
 - Aktif ve pasif sağlık kontrolü: sağlıksız bir backend'i çıkarmak, iyileşince geri almak.
 - Yapılandırılabilir hata stratejileri: başka bir backend'de yeniden denemek, hemen hata dönmek ya
   da devre kesmek.
@@ -166,8 +171,6 @@ var olduğunu değil.
 
 - TLS sonlandırma, HTTP/2 ve gRPC.
 - Dağıtık ya da çok düğümlü dengeleme ve servis keşfi.
-- Yük dengeleyicinin koyduğu bir cookie ile sticky session. Consistent hashing (§5.5) bir istemciyi,
-  istemcinin kendisinin gönderdiği bir anahtarla tek bir backend'de tutar.
 - Elle yazılmış bir epoll olay döngüsü. Özgün tasarım bunu opsiyonel bir öğrenme egzersizi olarak
   planlamıştı; yapılmadı ve sistemde hiçbir şey ona bağlı değil (§4.3).
 
@@ -447,6 +450,57 @@ havuz dışındaki bir evin ötesine; `keyless`, yüke göre. Yalnızca ilk dene
 dashboard'u yerleşimleri, anahtarlı isteklerin evde kalan payını ve mock backend'lerin önbellek
 isabet oranını gösterir.
 
+### 5.6 Sticky session
+
+> **Durum:** v1.5.0 için gerçekleştirildi; §10.10 onu ölçer.
+
+**Consistent hashing'in yanında neden.** Consistent hashing bir istemciyi, istemcinin gönderdiği bir
+anahtara göre yerleştirir; bir tarayıcı ise hiçbir anahtar göndermez. Sticky session, yük
+dengeleyicinin ona bir anahtar vermesini sağlar. `sticky.mode: cookie` altında bir istemcinin ilk
+isteği, hangisi olursa olsun yapılandırılmış strateji tarafından yerleştirilir ve yanıt, onu veren
+backend'i adlandıran bir cookie taşır; cookie'yi taşıyan sonraki istekler, o backend onları
+karşılayabildiği sürece oraya gider.
+
+**Cookie.** Değeri, backend adresinin bir gizli anahtar altındaki HMAC-SHA256'sının ilk 128 bitidir;
+dolgusuz base64url olarak. Backend'i adresini ele vermeden adlandırır ve gizli anahtarı olmayan bir
+istemci, hiç gönderilmediği bir backend için değeri üretemez; yalnızca kendisine verileni geri
+gönderebilir. Bütün havuzun değerleri bir yapılandırma uygulanırken hesaplanır; böylece bir istek bir
+map aramasına mal olur, hiç kriptografiye değil. Cookie `HttpOnly`, `SameSite=Lax` ve `/` kapsamlıdır;
+`sticky.secure` ayarlıysa `Secure`'dur — bu yalnızca TLS'i sonlandıran bir şeyin arkasında anlamlıdır
+— ve `sticky.max_age` aksini söylemedikçe tarayıcı kapanana kadar tutulur. İstek iletilmeden önce
+üzerinden alınır; HAProxy'nin `cookie … indirect`'inin yaptığı gibi [8]; istemcinin diğer cookie'leri
+bayt bayt olduğu gibi kalır.
+
+**Gizli anahtar** `LB_STICKY_SECRET` ortam değişkeninden, en az 32 karakter olarak gelir; böylece
+commit'lenmesi amaçlanan yapılandırma dosyası hiçbir sır tutmaz. Tanımlı değilse yük dengeleyici
+başlarken bir tane üretir ve uyarır: pin'leri o zaman süreç yaşadıkça sürer ve başka hiçbir yük
+dengeleyici onları tanımaz. Aynı gizli anahtar verilen yük dengeleyiciler birbirlerinin cookie'lerini
+tanır ve bir yenileme gizli anahtarı korur.
+
+**Bir pin ne zaman bozulur.**
+
+| Cookie | İstek nereye gider | Yanıt |
+| --- | --- | --- |
+| adaylar arasındaki bir backend'i adlandırıyor | o backend'e | cookie koymaz |
+| yok | stratejinin yerleştirdiği yere | istemciyi oraya pinler |
+| havuz dışındaki bir backend'i adlandırıyor — sağlıksız, devresi açık, bir yenilemeyle çıkarılmış | stratejinin yerleştirdiği yere | istemciyi oraya pinler |
+| denemesi başarısız olan bir backend'i adlandırıyor | başarısız her deneme gibi bir retry'a | istemciyi cevap veren backend'e pinler |
+| havuzun hiçbir backend'ini adlandırmıyor — sahte, başka bir anahtarla imzalanmış ya da eskimiş | stratejinin yerleştirdiği yere | istemciyi oraya pinler |
+
+**Yük sınırı yok.** Pinlenmiş bir istemciyi taşımak oturumunu taşımaktır ve yük arttıkça istemcileri
+taşıyan bir sınır, pin'in amacını ortadan kaldırırdı. HAProxy'nin cookie kalıcılığı da aynı biçimde
+yükü yok sayar ve yalnızca hata durumunda yeniden dağıtır. Yük dengeleyiciye pinlenmiş bir backend'in
+bir isteği alamayacağını söyleyen şey, her stratejinin zaten sahip olduğudur: sağlık kontrolü, devre
+kesici, başarısız bir deneme ve `retry_on_5xx` altında bir 5xx. Sınır, denge faktörü olarak
+consistent hashing'e aittir.
+
+**Consistent hashing ile birlikte** pin anahtardan önce gelir: cookie istemcinin oturumunun nerede
+olduğunu, anahtar ise yalnızca nereye yerleştirileceğini söyler.
+
+**Gözlemlenebilirlik.** `lb_sticky_requests_total` cookie'nin her istek için ne yaptığını sayar —
+`pinned`, `new`, `repinned` ya da `unknown` — yalnızca ilk denemelerde. `/status` modu, Backends
+dashboard'u ise sonuçları ve cookie taşıyan isteklerden backend'inde tutulanların payını gösterir.
+
 ---
 
 ## 6. Hata yönetimi
@@ -595,6 +649,11 @@ Bu sürümde güvenlik, ağır bir katmandan çok, ucuz ama etkisi büyük önle
   zaten reddeder; kontrol, proxy buna bağımlı olmasın diye tekrarlanır.
 - **Yönlendirme başlıkları.** `X-Forwarded-For` ve ilgili başlıklar eklenmez, yeniden yazılır;
   böylece bir istemci backend'in göreceği adresi taklit edemez.
+- **Sticky cookie** (§5.6) bir backend'i adresinin HMAC'iyle adlandırır; böylece hiçbir adres ele
+  vermez ve bir istemci, hiç gönderilmediği bir backend için cookie üretemez. `HttpOnly` ve
+  `SameSite=Lax`'tir, yapılandırıldığında `Secure`'dur ve istek bir backend'e ulaşmadan önce üzerinden
+  alınır. Gizli anahtar hiçbir zaman yapılandırma dosyasından değil, ortamdan gelir ve en az 32
+  karakter olmalıdır.
 - **Ayrı gözlemlenebilirlik portu.** `/metrics`, `/status`, `/healthz`, `/readyz` ve opsiyonel
   pprof uçları trafik portunda değil, `metrics_addr` üzerinde sunulur. pprof, heap ve goroutine durumunu açığa çıkardığı için
   varsayılan olarak kapalıdır.
@@ -618,6 +677,8 @@ Bu sürümde güvenlik, ağır bir katmandan çok, ucuz ama etkisi büyük önle
 | `lb_config_reloads_total` | counter | result | uygulanan ya da reddedilen yenilemeler |
 | `lb_backend_active_connections` | gauge | backend | uçuştaki istekler, scrape anında okunur |
 | `lb_backend_healthy` | gauge | backend | 1 sağlıklı, 0 değil; scrape anında okunur |
+| `lb_hash_placements_total` | counter | placement | consistent hashing'in bir isteği nereye yerleştirdiği (§5.5) |
+| `lb_sticky_requests_total` | counter | result | sticky cookie'nin bir istek için ne yaptığı (§5.6) |
 
 İki gauge, ayrı değişkenlere kopyalanmak yerine Prometheus scrape ettiğinde canlı durumdan okunur;
 böylece zamanla sapabilecek ikinci bir kopya yoktur.
@@ -632,8 +693,8 @@ hata göstermezdi. Neden etiketi v1.3.2'den sonra eklendi (Ek B, 17. madde).
 
 ### 8.2 Durum, loglar ve profilleme
 
-`/status` bir scraper'a değil bir insana cevap verir: algoritma, sağlıklı backend sayısı, uygulanan
-yenileme sayısı ve her backend'in ağırlığı, sağlığı ve uçuştaki istek sayısı. Loglar `log/slog`
+`/status` bir scraper'a değil bir insana cevap verir: algoritma, sticky modu, sağlıklı backend
+sayısı, uygulanan yenileme sayısı ve her backend'in ağırlığı, sağlığı ve uçuştaki istek sayısı. Loglar `log/slog`
 üzerinden yapılandırılmış JSON (ya da metin) olarak yazılır. Etkinleştirildiğinde `/debug/pprof`
 metrik portunda sunulur.
 
@@ -1093,6 +1154,49 @@ sınırının içinde, 1,22 katını; karşılığında isabet oranından dört 
 cevaplandı ve p99 %37 düştü. Kapasiteye göre ağırlıklarla en meşgul backend, sınırı daha büyük olan
 hızlılardan biridir ve havuz sınırsız haline göre bir buçuk kat istek cevapladı.
 
+### 10.10 Consistent hashing'e karşı sticky session
+
+**Düzenek.** §10.9'daki gibi: makinede on profilli backend, her biri 5.000 oturum hatırlıyor, bir
+ıska 40 ms'ye mal oluyor, 40 bağlantıdan 30.000 düzgün oturum, her koşudan önce temizlenen
+önbellekler, her yapılandırma için bir koşu. `loadgen -cookies` ile her oturum kendisine verilen
+cookie'leri tutar; böylece yük dengeleyici 30.000 tarayıcı görür. Cookie'leri üreteç tuttuğu için her
+ısınma ve ardından gelen olay tek bir koşuda olur; ikinci bir koşu hiç cookie'siz gelirdi.
+
+**Ölçmeden önce yazılan hipotezler.**
+
+1. Sticky cookie'li round robin consistent hashing'in isabet oranına ulaşır: her oturumun ilk isteği
+   herhangi bir yere düşer, sonrakilerin her biri ilkinin düştüğü yere.
+2. Bir backend katıldığında consistent hashing oturumların on birde birini ona taşır ve oturumlar
+   orada ıskalarken isabet oranı düşer; sticky session hiçbirini taşımaz, bu yüzden isabet oranı
+   düşmez, ama yeni backend yalnızca hiç görmediği oturumları alır; ısınmadan sonra bunlar neredeyse
+   hiç yoktur.
+3. Bir backend öldüğünde sticky session yalnızca onun oturumlarını yeniden pinler.
+
+**Sonuçlar.**
+
+| Yapılandırma | Cevaplanan | p50 | p99 | İsabet oranı |
+| --- | --- | --- | --- | --- |
+| sticky cookie'li round robin | 1.110 istek/s | 21,2 ms | 240,9 ms | %94,7 |
+| consistent hashing, sınırsız (§10.9) | 1.099 istek/s | 21,4 ms | 241,4 ms | %94,7 |
+
+| On birinci bir backend yenilemeyle katılır | İsabet oranı önce; sonraki 3 s'de; ardından gelen 22 s'de | Yeni backend'in aldığı istekler |
+| --- | --- | --- |
+| consistent hashing, sınırsız | %94,3, %88,0, %92,0 | %9,1 |
+| sticky cookie'li round robin | %94,5, %96,9, %97,5 | %0,4 |
+
+Üç hipotez de tutar. Bir cookie ile round robin her oturumu başladığı yerde tuttu ve istemci hiçbir
+anahtar göndermeden her ölçütte consistent hashing'i yakaladı. Fark havuz değiştiğinde görünür.
+Consistent hashing yeni backend'e isteklerin %9,1'ini verdi — on birde bir %9,09'dur — ve bunun
+bedelini, o oturumlar orada ıskalarken altı puanlık bir düşüşle ödedi. Sticky session hiçbir bedel
+ödemedi ve hiçbir şeyi taşımadı; yeni backend isteklerin %0,4'üyle neredeyse boşta kaldı: ancak yeni
+istemciler geldikçe ya da eski pin'ler bozuldukça pay alır. İkisi de yanlış değildir: biri havuzu
+hemen dengeler, diğeri her oturumu sıcak tutar.
+
+Sticky bir koşunun ortasında backend-4 öldürüldüğünde 1.559 istek backend'ini yok buldu ve yeniden
+pinlendi; hiçbir istek başarısız olmadı. Hayatta kalanların isabet oranı önce %93,3'ten sonraki üç
+saniyede %85,9'a, ardından gelen yirmi saniyede %90,5'e gitti: kendi oturumları pin'lerini korudu;
+düşüş, taşınan oturumların düştükleri yerde bir kez ıskalamasıdır.
+
 ---
 
 ## 11. Tartışma
@@ -1201,9 +1305,10 @@ bu yüzden yalnızca bayt ve bellek ayırma sayıları kapı olarak kullanılır
   power of two choices'ın taramayı geçtiği yerde ölçülmesini sağlar (§10.7).
 - **Tek düğüm.** Hız sınırları, devre durumu ve retry budget süreç başınadır; birkaç yük dengeleyici
   örneğinin her biri kendi sınırını uygular.
-- **Cookie ile yakınlık yok.** Consistent hashing bir istemciyi backend'inde yalnızca istemcinin
-  kendisinin gönderdiği bir anahtarla tutar (§5.5). Yük dengeleyicinin koyduğu bir cookie ile
-  tutulan oturumlar v1.5.0 için planlanmıştır.
+- **Sticky session yeniden dengelemez.** Havuza eklenen bir backend, pin'ler bozulana kadar yalnızca
+  görmediği istemcileri alır; §10.10'da isteklerin %0,4'ü. Consistent hashing payını hemen taşır,
+  bedeli isabet oranıdır. `sticky.max_age` ile süresi dolan bir pin, havuzun zamanla dengelenmesine
+  izin vermenin bir yoludur.
 - **Log toplama ve uyarılar** (Loki, Alertmanager) v1.0 sonrasına ertelenmişti ve hâlâ yok.
 - **Gerçek bir dağıtım**, ücretsiz bir bulut katmanında ve herkese açık bir demoyla, hâlâ olası bir
   sonraki adımdır.
@@ -1281,6 +1386,12 @@ consistent_hash:                    # consistent_hash altında okunur
   key: header:X-Session             # header:<Ad> | client_ip; consistent_hash altında zorunlu
   balance_factor: 150               # her backend'in yükü için, payının yüzdesi olarak sınır; 0 = yok
 
+sticky:
+  mode: none                        # none | cookie
+  cookie: lb_backend                # cookie'nin adı
+  max_age: 0s                       # 0: tarayıcı kapanana kadar tutulur
+  secure: false                     # TLS'i sonlandıran bir şeyin arkasında true
+
 retry:
   max_retries: 2                    # retry_next_backend altında en az 1
   budget_percent: 20                # uçuştaki retry: uçuştaki isteklerin en fazla bu payı
@@ -1318,8 +1429,10 @@ logging:
   format: json                      # json | text
 ```
 
-`metrics_addr`, `response_timeout`, `budget_percent`, `min_retry_concurrency`, backend ağırlıkları
-ve loglama için varsayılanlar uygulanır. Bilinmeyen alanlar hatadır. "Yeniden başlatma gerekir"
+`metrics_addr`, `response_timeout`, `budget_percent`, `min_retry_concurrency`, backend ağırlıkları,
+sticky modu ve cookie'si ve loglama için varsayılanlar uygulanır. Bilinmeyen alanlar hatadır. Sticky
+cookie'lerin imzalandığı gizli anahtar bir alan değildir: en az 32 karakter olarak `LB_STICKY_SECRET`
+ortam değişkeninden okunur, tanımlı değilse başlangıçta üretilir. "Yeniden başlatma gerekir"
 olarak işaretlenmeyen her şey `SIGHUP` ile uygulanır.
 
 `write_timeout`'tan kısa olmayan bir `response_timeout` kabul edilir ama başlangıçta ve her
@@ -1636,6 +1749,23 @@ eklendi (13. madde), böylece bu kazanç iddia edilmek yerine ölçülebildi. Re
 ağırlıklar, en az taşıma ve yeniden kurulacak hiçbir durumun olmaması için halka, jump hash ve
 Maglev'e tercih edildi (§5.5); sınır ise tek bir popüler anahtar aksi halde bir backend'i aşırı
 yükleyeceği için eklendi.
+
+### B.19 İmzalı bir cookie ile sticky session
+
+*v1.6 §3.3 · v1.4.0'dan sonra · §5.6, §7, §10.10*
+
+**v1.6.** Sticky session kapsam dışı: backend'lerin durumsuz olduğu varsayılır.
+
+**Bunun yerine.** İsteğe bağlı bir `sticky` bölümü, hangi strateji yapılandırılmışsa onun üzerinde,
+yük dengeleyicinin koyduğu bir cookie ile bir istemciyi ona ilk cevap veren backend'de tutar. Cookie
+backend'i adresinin bir HMAC'iyle adlandırır, istek iletilmeden önce üzerinden alınır ve ortamdan
+okunan bir gizli anahtarla imzalanır.
+
+**Neden.** Consistent hashing (18. madde) istemcinin bir anahtar göndermesini ister; bir tarayıcı ise
+hiçbir anahtar göndermez, yük dengeleyici ona bir tane verebilir. İmzalamak, cookie'nin istemcilere
+havuzun adreslerini söylemesini ya da bir backend seçmelerine izin vermesini engeller; gizli anahtarı
+ortamdan okumak onu commit'lenen bir yapılandırma dosyasının dışında tutar. Cookie, HAProxy'ninki gibi
+yükü yok sayar, çünkü pinlenmiş bir istemciyi taşımak oturumunu taşımaktır.
 
 ### Yapılmayan: epoll deneyi
 
