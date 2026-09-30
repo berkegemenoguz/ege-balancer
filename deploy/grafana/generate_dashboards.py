@@ -309,6 +309,19 @@ def backends():
              description="Share of the requests naming a session that the mock backend remembered, across the pool. Keeping sessions at home is what raises it; only the realistic backends remember anything."),
     ]
     L.y += 8
+    P.append(row(L, "Sticky sessions"))
+    with_cookie = f'sum(rate(lb_sticky_requests_total{{result=~"pinned|repinned|unknown"}}[{W}]))'
+    P += [
+        timeseries(L, "What the sticky cookie did", [target(f"sum by (result) (rate(lb_sticky_requests_total[{W}]))", "{{result}}")],
+                   0, 16, 8, "reqps", no_value="sticky sessions are off",
+                   overrides=[fixed("pinned", "green"), fixed("new", "blue"), fixed("repinned", "orange"), fixed("unknown", "red")],
+                   description="Requests under sticky sessions: sent where their cookie said (pinned), placed by the algorithm because they had no cookie (new) or because their backend was out of the pool (repinned), or carrying a cookie that named no backend of the pool (unknown) — forged, signed with another secret, or for a backend since removed."),
+        stat(L, "Kept on their backend", [target(f'sum(rate(lb_sticky_requests_total{{result="pinned"}}[{W}])) / {with_cookie}')],
+             16, 8, 8, "percentunit", decimals=1, no_value="—",
+             steps=[{"color": "red", "value": None}, {"color": "orange", "value": 0.9}, {"color": "green", "value": 0.98}],
+             description="Share of the requests carrying a sticky cookie that went where it said. What is lost moved because its backend left the pool, or because the cookie named no backend."),
+    ]
+    L.y += 8
     return dashboard("ege-balancer-backends", "Ege-Balancer — Backends",
                      "How each backend is doing and how the traffic is shared between them.", P)
 
