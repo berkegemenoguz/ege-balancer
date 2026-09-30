@@ -71,6 +71,23 @@ func TestPlacementsAreCountedFromZero(t *testing.T) {
 	}
 }
 
+func TestStickyResultsAreCountedFromZero(t *testing.T) {
+	metrics := NewMetrics()
+	metrics.ObserveSticky(StickyPinned)
+
+	body := scrape(t, metrics.Handler())
+	for _, want := range []string{
+		`lb_sticky_requests_total{result="pinned"} 1`,
+		`lb_sticky_requests_total{result="new"} 0`,
+		`lb_sticky_requests_total{result="repinned"} 0`,
+		`lb_sticky_requests_total{result="unknown"} 0`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics do not contain %q", want)
+		}
+	}
+}
+
 func TestPreparedFailureCountersStartAtZero(t *testing.T) {
 	metrics := NewMetrics()
 	metrics.PrepareBackendFailures("backend-1:5678", "connect", "timeout")
@@ -149,6 +166,7 @@ func TestStatusReportsThePool(t *testing.T) {
 	pool := NewPool("weighted_round_robin", backends, stubChecker{unhealthy: map[string]bool{
 		"backend-1:5678": true,
 	}})
+	pool.SetSticky("cookie")
 
 	recorder := httptest.NewRecorder()
 	Endpoints(NewMetrics(), pool, NewProbes(pool), false).ServeHTTP(recorder,
@@ -163,8 +181,8 @@ func TestStatusReportsThePool(t *testing.T) {
 		t.Fatalf("decode status: %v", err)
 	}
 
-	if got.Algorithm != "weighted_round_robin" {
-		t.Errorf("algorithm = %q, want the configured one", got.Algorithm)
+	if got.Algorithm != "weighted_round_robin" || got.Sticky != "cookie" {
+		t.Errorf("algorithm %q, sticky %q; want the configured ones", got.Algorithm, got.Sticky)
 	}
 	if got.Total != 2 || got.Healthy != 1 {
 		t.Errorf("healthy %d of %d, want 1 of 2", got.Healthy, got.Total)

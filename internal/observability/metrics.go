@@ -21,6 +21,7 @@ type Metrics struct {
 	rejections *prometheus.CounterVec
 	reloads    *prometheus.CounterVec
 	placements *prometheus.CounterVec
+	sticky     *prometheus.CounterVec
 }
 
 // Where consistent hashing placed a request.
@@ -40,6 +41,26 @@ const (
 // placements are every placement, created at zero so that the first request
 // of each kind is a change rate() can see.
 var placements = []string{PlacementHome, PlacementOverloaded, PlacementUnavailable, PlacementKeyless}
+
+// What a sticky cookie did for a request.
+const (
+	// StickyPinned: the cookie named a backend that could take the request,
+	// and the request went there.
+	StickyPinned = "pinned"
+	// StickyNew: the request carried no cookie; the algorithm placed it, and
+	// the answer carries one.
+	StickyNew = "new"
+	// StickyRepinned: the cookie named a backend out of the pool, so the
+	// algorithm placed the request, and the answer carries a new cookie.
+	StickyRepinned = "repinned"
+	// StickyUnknown: the cookie named no backend in the pool — forged, signed
+	// with another secret, or for a backend since removed — and was treated as
+	// absent.
+	StickyUnknown = "unknown"
+)
+
+// stickyResults are every sticky result, created at zero for the same reason.
+var stickyResults = []string{StickyPinned, StickyNew, StickyRepinned, StickyUnknown}
 
 // NewMetrics registers the load balancer's own collectors on a private
 // registry, so that the exposed metrics are only the ones defined here.
@@ -77,12 +98,20 @@ func NewMetrics() *Metrics {
 			Name: "lb_hash_placements_total",
 			Help: "Requests placed by consistent hashing, by where they went: home, overloaded, unavailable or keyless.",
 		}, []string{"placement"}),
+		sticky: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "lb_sticky_requests_total",
+			Help: "Requests under sticky sessions, by what their cookie did: pinned, new, repinned or unknown.",
+		}, []string{"result"}),
 	}
 	for _, placement := range placements {
 		m.placements.WithLabelValues(placement)
 	}
+	for _, result := range stickyResults {
+		m.sticky.WithLabelValues(result)
+	}
 
-	m.registry.MustRegister(m.requests, m.duration, m.failures, m.retries, m.rejections, m.reloads, m.placements)
+	m.registry.MustRegister(m.requests, m.duration, m.failures, m.retries, m.rejections, m.reloads,
+		m.placements, m.sticky)
 	return m
 }
 
@@ -112,6 +141,11 @@ func (m *Metrics) PrepareBackendFailures(backend string, reasons ...string) {
 // ObservePlacement records where consistent hashing placed a request.
 func (m *Metrics) ObservePlacement(placement string) {
 	m.placements.WithLabelValues(placement).Inc()
+}
+
+// ObserveSticky records what a sticky cookie did for a request.
+func (m *Metrics) ObserveSticky(result string) {
+	m.sticky.WithLabelValues(result).Inc()
 }
 
 // ObserveRetry records a retry the retry budget allowed.

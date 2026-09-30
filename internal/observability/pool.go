@@ -22,6 +22,7 @@ type Pool struct {
 	// mu guards what a reload replaces; Collect and the status handler read it.
 	mu        sync.RWMutex
 	algorithm string
+	sticky    string
 	backends  []*balancer.Backend
 	checker   health.Checker
 
@@ -53,6 +54,13 @@ func (p *Pool) Reload(algorithm string, backends []*balancer.Backend) {
 	p.mu.Unlock()
 
 	p.reloads.Add(1)
+}
+
+// SetSticky records the sticky sessions mode in force, for /status.
+func (p *Pool) SetSticky(mode string) {
+	p.mu.Lock()
+	p.sticky = mode
+	p.mu.Unlock()
 }
 
 // snapshot returns what to report, without holding the lock while reporting.
@@ -87,6 +95,7 @@ func (p *Pool) Collect(metrics chan<- prometheus.Metric) {
 // status is the document served by /status.
 type status struct {
 	Algorithm string          `json:"algorithm"`
+	Sticky    string          `json:"sticky,omitempty"`
 	Reloads   int64           `json:"reloads"`
 	Healthy   int             `json:"healthy_backends"`
 	Total     int             `json:"total_backends"`
@@ -106,8 +115,12 @@ type backendStatus struct {
 func (p *Pool) StatusHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		algorithm, backends := p.snapshot()
+		p.mu.RLock()
+		sticky := p.sticky
+		p.mu.RUnlock()
 		current := status{
 			Algorithm: algorithm,
+			Sticky:    sticky,
 			Reloads:   p.reloads.Load(),
 			Total:     len(backends),
 			Backends:  make([]backendStatus, 0, len(backends)),
