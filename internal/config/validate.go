@@ -34,6 +34,7 @@ func (c *Config) validate() error {
 			c.Algorithm, RoundRobin, LeastConnections, WeightedRoundRobin, ConsistentHashing)
 	}
 	problems = append(problems, c.validateConsistentHash()...)
+	problems = append(problems, c.validateSticky()...)
 
 	switch c.FailurePolicy {
 	case RetryNextBackend, FailFast, CircuitBreakerPolicy:
@@ -171,7 +172,24 @@ func (c *Config) validateConsistentHash() []error {
 	return problems
 }
 
-// isToken reports whether s can be a header name: one or more of the
+func (c *Config) validateSticky() []error {
+	var problems []error
+	switch c.Sticky.Mode {
+	case StickyNone, StickyCookie:
+	default:
+		problems = append(problems, fmt.Errorf("sticky.mode %q is unknown, expected %s or %s",
+			c.Sticky.Mode, StickyNone, StickyCookie))
+	}
+	if !isToken(c.Sticky.Cookie) {
+		problems = append(problems, fmt.Errorf("sticky.cookie %q is not a valid cookie name", c.Sticky.Cookie))
+	}
+	if c.Sticky.MaxAge < 0 {
+		problems = append(problems, errors.New("sticky.max_age must not be negative"))
+	}
+	return problems
+}
+
+// isToken reports whether s can be a header or cookie name: one or more of the
 // characters RFC 9110 allows in a token.
 func isToken(s string) bool {
 	if s == "" {

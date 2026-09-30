@@ -161,6 +161,26 @@ func TestLoadReadsConsistentHashing(t *testing.T) {
 	}
 }
 
+func TestStickySessionsAreOffUnlessAskedFor(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sticky.Mode != StickyNone || cfg.Sticky.Cookie != DefaultStickyCookie {
+		t.Errorf("omitted sticky = %+v, want mode none and the default cookie", cfg.Sticky)
+	}
+
+	content := replace(t, "algorithm:", "algorithm: round_robin\nsticky:\n  mode: cookie\n  cookie: session_backend\n  max_age: 1h\n  secure: true")
+	cfg, err = Load(writeConfig(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Sticky{Mode: StickyCookie, Cookie: "session_backend", MaxAge: Duration(time.Hour), Secure: true}
+	if cfg.Sticky != want {
+		t.Errorf("sticky = %+v, want %+v", cfg.Sticky, want)
+	}
+}
+
 func TestLoadRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -175,6 +195,9 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"hash key of an unknown kind", "algorithm:", "algorithm: consistent_hash\nconsistent_hash:\n  key: cookie:session", `consistent_hash.key "cookie:session" is unknown`},
 		{"hash key naming no header", "algorithm:", "algorithm: consistent_hash\nconsistent_hash:\n  key: \"header:\"", `consistent_hash.key "header:" is unknown`},
 		{"hash key naming an impossible header", "algorithm:", "algorithm: consistent_hash\nconsistent_hash:\n  key: \"header:X Session\"", `consistent_hash.key "header:X Session" is unknown`},
+		{"unknown sticky mode", "algorithm:", "algorithm: round_robin\nsticky:\n  mode: header", `sticky.mode "header" is unknown`},
+		{"cookie name with a space", "algorithm:", "algorithm: round_robin\nsticky:\n  mode: cookie\n  cookie: \"lb backend\"", `sticky.cookie "lb backend" is not a valid cookie name`},
+		{"negative cookie age", "algorithm:", "algorithm: round_robin\nsticky:\n  mode: cookie\n  max_age: -1s", "sticky.max_age must not be negative"},
 		{"balance factor below the average", "algorithm:", "algorithm: round_robin\nconsistent_hash:\n  balance_factor: 50", "balance_factor must be 0 for no bound, or a percentage of at least 100"},
 		{"unknown failure policy", "failure_policy:", "failure_policy: explode", `failure_policy "explode" is unknown`},
 		{"negative retries", "  max_retries:", "  max_retries: -1", "must not be negative"},

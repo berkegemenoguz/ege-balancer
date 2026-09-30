@@ -37,6 +37,19 @@ const (
 	CircuitBreakerPolicy FailurePolicy = "circuit_breaker"
 )
 
+// StickyMode selects how a client is kept on the backend that first served it.
+type StickyMode string
+
+const (
+	// StickyNone places every request by the algorithm alone.
+	StickyNone StickyMode = "none"
+	// StickyCookie keeps a client on its backend by a cookie the balancer sets.
+	StickyCookie StickyMode = "cookie"
+)
+
+// DefaultStickyCookie is the name of the balancer's cookie when none is given.
+const DefaultStickyCookie = "lb_backend"
+
 // LogLevel is the minimum severity that is written to the log.
 type LogLevel string
 
@@ -68,6 +81,7 @@ type Config struct {
 	EnablePprof    bool           `yaml:"enable_pprof"`
 	Algorithm      Algorithm      `yaml:"algorithm"`
 	ConsistentHash ConsistentHash `yaml:"consistent_hash"`
+	Sticky         Sticky         `yaml:"sticky"`
 	FailurePolicy  FailurePolicy  `yaml:"failure_policy"`
 	RetryOn5xx     bool           `yaml:"retry_on_5xx"`
 	Retry          Retry          `yaml:"retry"`
@@ -104,6 +118,22 @@ func (h ConsistentHash) Header() (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+// Sticky configures session affinity. Under cookie, the first request of a
+// client is placed by the algorithm, and a cookie the balancer sets keeps the
+// client's later requests on the backend that answered it, for as long as that
+// backend can take them.
+type Sticky struct {
+	Mode StickyMode `yaml:"mode"`
+	// Cookie is the name of the balancer's cookie.
+	Cookie string `yaml:"cookie"`
+	// MaxAge is how long the browser keeps the cookie; 0 keeps it until the
+	// browser closes.
+	MaxAge Duration `yaml:"max_age"`
+	// Secure restricts the cookie to HTTPS. The balancer speaks plain HTTP,
+	// so this is for a balancer behind something that terminates TLS.
+	Secure bool `yaml:"secure"`
 }
 
 // Retry bounds how often a single request may be forwarded again, and how many
@@ -212,6 +242,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Timeouts.ResponseTimeout == 0 {
 		c.Timeouts.ResponseTimeout = c.Timeouts.ReadTimeout
+	}
+	if c.Sticky.Mode == "" {
+		c.Sticky.Mode = StickyNone
+	}
+	if c.Sticky.Cookie == "" {
+		c.Sticky.Cookie = DefaultStickyCookie
 	}
 	if c.Logging.Level == "" {
 		c.Logging.Level = LevelInfo
