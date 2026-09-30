@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -129,5 +130,32 @@ func TestSetScalarRoundTripsToTheSameBytes(t *testing.T) {
 		t.Errorf("restoring the value left the file changed:\n%q\nwant\n%q",
 			lineWith(t, string(restored), "rate_limit_per_ip:"),
 			lineWith(t, sample, "rate_limit_per_ip:"))
+	}
+}
+
+// TestTheShippedConfigurationCanBeEditedByTheConsole runs the console's edits
+// against the file it edits, so that a key added elsewhere in the file with the
+// same name cannot quietly break one of them.
+func TestTheShippedConfigurationCanBeEditedByTheConsole(t *testing.T) {
+	shipped, err := os.ReadFile("../../configs/lb.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, values := range map[string][2]string{
+		"algorithm":         {"consistent_hash", "round_robin"},
+		"mode":              {"cookie", "none"},
+		"rate_limit_per_ip": {"5", "100"},
+	} {
+		changed, err := setScalar(shipped, key, values[0])
+		if err != nil {
+			t.Fatalf("setting %s: %v", key, err)
+		}
+		restored, err := setScalar(changed, key, values[1])
+		if err != nil {
+			t.Fatalf("restoring %s: %v", key, err)
+		}
+		if string(restored) != string(shipped) {
+			t.Errorf("setting %s and setting it back changed the file", key)
+		}
 	}
 }

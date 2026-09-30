@@ -74,6 +74,12 @@ one left running cannot spoil the next measurement. The
 [Faults dashboard](http://localhost:3000/d/ege-balancer-faults) follows each one from the backend to
 the client, and every dashboard shades the time it was in force.
 
+Turning sticky sessions on or off sets `sticky.mode` in the same file and reloads. The sustained
+traffic keeps the cookie each of its sessions is given, so with sticky sessions on it behaves as 500
+browsers, each staying on its backend. The prompt shows `sticky` while it is on. Without
+`LB_STICKY_SECRET` in the environment that runs compose, the balancer signs its cookies with a
+secret of its own and says so in its log.
+
 If something is interrupted before the console can tidy up, one command puts the configuration
 back:
 

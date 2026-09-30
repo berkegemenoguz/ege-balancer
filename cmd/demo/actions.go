@@ -32,6 +32,11 @@ type traffic struct {
 	url    string
 	client *http.Client
 
+	// cookies keeps what each session was given, and sends it back, so that
+	// the sessions behave as browsers under sticky sessions.
+	cookiesMu sync.Mutex
+	cookies   map[string][]*http.Cookie
+
 	mu     sync.Mutex
 	stop   chan struct{}
 	closed chan struct{}
@@ -95,10 +100,25 @@ func (t *traffic) once() {
 	if err != nil {
 		return
 	}
-	request.Header.Set(sessionHeader, "session-"+strconv.Itoa(rand.IntN(sessions)))
+	session := "session-" + strconv.Itoa(rand.IntN(sessions))
+	request.Header.Set(sessionHeader, session)
+	t.cookiesMu.Lock()
+	for _, cookie := range t.cookies[session] {
+		request.AddCookie(cookie)
+	}
+	t.cookiesMu.Unlock()
+
 	response, err := t.client.Do(request)
 	if err != nil {
 		return
+	}
+	if set := response.Cookies(); len(set) > 0 {
+		t.cookiesMu.Lock()
+		if t.cookies == nil {
+			t.cookies = map[string][]*http.Cookie{}
+		}
+		t.cookies[session] = set
+		t.cookiesMu.Unlock()
 	}
 	_, _ = io.Copy(io.Discard, response.Body)
 	_ = response.Body.Close()
@@ -271,6 +291,13 @@ func (e *environment) applyConfig(ctx context.Context, con *console, edits ...fu
 func (e *environment) setAlgorithm(ctx context.Context, con *console, name string) error {
 	return e.applyConfig(ctx, con, func(content []byte) ([]byte, error) {
 		return setScalar(content, "algorithm", name)
+	})
+}
+
+// setSticky changes the sticky sessions mode, none or cookie.
+func (e *environment) setSticky(ctx context.Context, con *console, mode string) error {
+	return e.applyConfig(ctx, con, func(content []byte) ([]byte, error) {
+		return setScalar(content, "mode", mode)
 	})
 }
 

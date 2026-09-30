@@ -89,6 +89,8 @@ func run(ctx context.Context, con *console, env *environment) error {
 			showStatus(ctx, con, env)
 		case "8":
 			misbehave(ctx, con, env, book)
+		case "9":
+			toggleSticky(ctx, con, env)
 		case "r":
 			reset(ctx, con, env, flow, book, baseline)
 		case "q", "":
@@ -122,6 +124,7 @@ func welcome(con *console, env *environment, current status) {
 	con.step("3  stop a backend            4  start a backend")
 	con.step("5  change the algorithm      6  demonstrate the rate limit")
 	con.step("7  show the status           8  make a backend misbehave")
+	con.step("9  sticky sessions on or off")
 	con.step("r  reset everything          q  quit")
 	con.step("?  show this again")
 	con.note("every action prints the command it runs, so it can be repeated by hand")
@@ -131,9 +134,13 @@ func welcome(con *console, env *environment, current status) {
 // faults the console started, because a change made several actions ago is
 // otherwise easy to forget and makes the next measurement look wrong.
 func prompt(ctx context.Context, env *environment, flow *traffic, book *faultBook) string {
-	state := mustStatus(ctx, env).Algorithm
+	current := mustStatus(ctx, env)
+	state := current.Algorithm
 	if state == "" {
 		state = "unreachable"
+	}
+	if current.Sticky == "cookie" {
+		state += " · sticky"
 	}
 	if flow.running() {
 		state += " · traffic on"
@@ -217,6 +224,26 @@ func orDefault(answer, fallback string) string {
 		return fallback
 	}
 	return answer
+}
+
+// toggleSticky turns sticky sessions on or off.
+func toggleSticky(ctx context.Context, con *console, env *environment) {
+	next := "cookie"
+	if mustStatus(ctx, env).Sticky == "cookie" {
+		next = "none"
+	}
+	if err := env.setSticky(ctx, con, next); err != nil {
+		con.fail("%v", err)
+		return
+	}
+	if next == "none" {
+		con.ok("sticky sessions off: every request is placed by the algorithm again")
+		return
+	}
+	con.ok("sticky sessions on: a client stays on the backend that first answered it")
+	con.note("the traffic from 1 keeps a cookie for each of its sessions, as 500 browsers would;")
+	con.note("  curl -si -c /tmp/lb.cookies -b /tmp/lb.cookies localhost:8080 | grep X-Backend")
+	con.note("sends one browser's requests by hand. The Backends dashboard counts the pins")
 }
 
 // toggleTraffic starts or stops the background stream.

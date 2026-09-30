@@ -12,6 +12,7 @@ import (
 // status is the part of the balancer's /status document the console uses.
 type status struct {
 	Algorithm string `json:"algorithm"`
+	Sticky    string `json:"sticky"`
 	Reloads   int64  `json:"reloads"`
 	Healthy   int    `json:"healthy_backends"`
 	Total     int    `json:"total_backends"`
