@@ -264,6 +264,7 @@ func (b *balancerUnderTest) requestReload(t *testing.T) {
 // reportedStatus is the part of /status the tests read.
 type reportedStatus struct {
 	Algorithm string `json:"algorithm"`
+	Sticky    string `json:"sticky"`
 	Reloads   int64  `json:"reloads"`
 	Healthy   int    `json:"healthy_backends"`
 	Total     int    `json:"total_backends"`
