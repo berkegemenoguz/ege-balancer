@@ -40,6 +40,9 @@ type Core struct {
 	checker health.Checker
 	metrics *observability.Metrics
 	forward *httputil.ReverseProxy
+	// secret signs sticky cookies. It is fixed for the handler's life, so a
+	// reload keeps every client's pin.
+	secret []byte
 
 	// current is replaced wholesale on a reload. A request reads it once and
 	// works from that snapshot, so a reload can never leave one request using
@@ -59,6 +62,8 @@ type settings struct {
 	maxBody    int64
 	// hashKey reads what consistent hashing places a request by.
 	hashKey func(*http.Request) string
+	// pins is the sticky cookie, nil when sticky sessions are off.
+	pins *pins
 }
 
 // New returns the handler that serves proxied traffic, with rate limiting and
@@ -69,9 +74,16 @@ func New(
 	backends []*balancer.Backend,
 	checker health.Checker,
 	metrics *observability.Metrics,
+	options ...Option,
 ) *Handler {
 	core := &Core{checker: checker, metrics: metrics}
-	core.current.Store(settingsFor(cfg, strategy, backends))
+	for _, option := range options {
+		option(core)
+	}
+	if len(core.secret) == 0 {
+		core.secret = newSecret()
+	}
+	core.current.Store(settingsFor(cfg, strategy, backends, core.secret))
 	core.forward = core.newReverseProxy(cfg, len(backends))
 	core.prepareMetrics(backends)
 
@@ -103,7 +115,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // change keep their counters.
 func (h *Handler) Reload(cfg *config.Config, strategy balancer.LBStrategy, backends []*balancer.Backend) {
 	h.limiter.setRate(cfg.Limits.RateLimitPerIP)
-	h.core.current.Store(settingsFor(cfg, strategy, backends))
+	h.core.current.Store(settingsFor(cfg, strategy, backends, h.core.secret))
 	h.core.prepareMetrics(backends)
 }
 
@@ -122,8 +134,9 @@ func (h *Handler) Strategy() balancer.LBStrategy {
 	return h.core.current.Load().strategy
 }
 
-// settingsFor snapshots the forwarding settings described by cfg.
-func settingsFor(cfg *config.Config, strategy balancer.LBStrategy, backends []*balancer.Backend) *settings {
+// settingsFor snapshots the forwarding settings described by cfg, with sticky
+// cookies signed by secret.
+func settingsFor(cfg *config.Config, strategy balancer.LBStrategy, backends []*balancer.Backend, secret []byte) *settings {
 	return &settings{
 		strategy:   strategy,
 		backends:   backends,
@@ -133,6 +146,7 @@ func settingsFor(cfg *config.Config, strategy balancer.LBStrategy, backends []*b
 		retryOn5xx: cfg.RetryOn5xx,
 		maxBody:    cfg.Limits.MaxRequestBodyBytes,
 		hashKey:    keyFor(cfg.ConsistentHash),
+		pins:       newPins(cfg.Sticky, secret, backends),
 	}
 }
 
@@ -160,6 +174,9 @@ func (c *Core) newReverseProxy(cfg *config.Config, backendCount int) *httputil.R
 			// The backend logs the same identifier as the balancer, which is what
 			// makes one request traceable across both.
 			r.Out.Header.Set(requestIDHeader, requestIDFrom(r.In.Context()))
+			if current := attemptFrom(r.In.Context()); current != nil && current.stickyCookie != "" {
+				removeCookie(r.Out.Header, current.stickyCookie)
+			}
 		},
 		Transport:  transport(cfg, backendCount),
 		BufferPool: newBufferPool(),
@@ -170,6 +187,9 @@ func (c *Core) newReverseProxy(cfg *config.Config, backendCount int) *httputil.R
 			if response.Request != nil {
 				if current := attemptFrom(response.Request.Context()); current != nil {
 					response.Body = &watchedBody{ReadCloser: response.Body, attempt: current}
+					if current.pin != nil {
+						response.Header.Add("Set-Cookie", current.pin.String())
+					}
 				}
 			}
 			return nil
@@ -202,9 +222,10 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer active.budget.requestFinished()
 
 	key := active.hashKey(r)
+	pinned, cookie := active.pins.read(r)
 	tried := make(map[string]bool, active.attempts)
 	for n := range active.attempts {
-		backend, err := c.choose(active, key, c.available(active, tried), n == 0)
+		backend, err := c.place(active, key, pinned, cookie, c.available(active, tried), n == 0)
 		if err != nil {
 			break
 		}
@@ -222,7 +243,7 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.metrics.ObserveRetry()
 		}
 
-		served, attemptErr := c.try(w, r, active, backend, body, retry)
+		served, attemptErr := c.try(w, r, active, backend, body, retry, active.pins.renew(pinned, backend))
 		if served {
 			return
 		}
@@ -259,16 +280,19 @@ func (c *Core) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // abort by panicking, and a release written after the call would be skipped:
 // each such retry would then hold its share of the budget for good, until
 // enough had leaked to refuse every retry until the next reload.
-func (c *Core) try(w http.ResponseWriter, r *http.Request, active *settings, backend *balancer.Backend, body []byte, retry bool) (bool, error) {
+func (c *Core) try(w http.ResponseWriter, r *http.Request, active *settings, backend *balancer.Backend,
+	body []byte, retry bool, pin *http.Cookie) (bool, error) {
 	if retry {
 		defer active.budget.retryFinished()
 	}
-	return c.serve(w, r, active, backend, body)
+	return c.serve(w, r, active, backend, body, pin)
 }
 
 // serve makes one attempt and reports whether the client was answered, and the
-// error that failed the attempt if it was not.
-func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, backend *balancer.Backend, body []byte) (bool, error) {
+// error that failed the attempt if it was not. pin, when not nil, is the sticky
+// cookie the answer carries if this backend gives it.
+func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, backend *balancer.Backend,
+	body []byte, pin *http.Cookie) (bool, error) {
 	// The counter is what least connections balances on, so it must cover the
 	// whole request, not just the choice.
 	backend.Acquire()
@@ -278,7 +302,7 @@ func (c *Core) serve(w http.ResponseWriter, r *http.Request, active *settings, b
 		r.Body = io.NopCloser(bytes.NewReader(body))
 	}
 
-	current := &attempt{ResponseWriter: w, status: http.StatusOK}
+	current := &attempt{ResponseWriter: w, status: http.StatusOK, pin: pin, stickyCookie: active.pins.cookieName()}
 	ctx := context.WithValue(r.Context(), backendKey{}, backend)
 	ctx = context.WithValue(ctx, attemptKey{}, current)
 
@@ -397,6 +421,10 @@ type attempt struct {
 	// aborted is the error of a backend that broke off an answer already on
 	// its way to the client.
 	aborted error
+	// pin is the sticky cookie the answer carries, and stickyCookie the name of
+	// the one taken off the request on its way to the backend.
+	pin          *http.Cookie
+	stickyCookie string
 }
 
 // WriteHeader records the status on its way to the client.
