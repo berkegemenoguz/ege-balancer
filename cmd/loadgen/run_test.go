@@ -215,3 +215,34 @@ func TestSkewedSessionsFavourAFew(t *testing.T) {
 		t.Errorf("without keys the sessions named were %v, want none", names)
 	}
 }
+
+func TestEverySessionKeepsItsOwnCookies(t *testing.T) {
+	var mu sync.Mutex
+	carried := map[string][]string{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session := r.Header.Get(sessionHeader)
+		mu.Lock()
+		if cookie, err := r.Cookie("lb_backend"); err == nil {
+			carried[session] = append(carried[session], cookie.Value)
+		} else {
+			carried[session] = append(carried[session], "")
+			http.SetCookie(w, &http.Cookie{Name: "lb_backend", Value: "pin-of-" + session})
+		}
+		mu.Unlock()
+	}))
+	defer backend.Close()
+
+	shape := load{url: backend.URL, method: http.MethodGet, keys: 2, jar: newSessionJar()}
+	for _, session := range []string{"session-0", "session-1", "session-0", "session-1", "session-0"} {
+		request(t.Context(), http.DefaultClient, shape, session, newSamples())
+	}
+
+	for session, want := range map[string][]string{
+		"session-0": {"", "pin-of-session-0", "pin-of-session-0"},
+		"session-1": {"", "pin-of-session-1"},
+	} {
+		if strings.Join(carried[session], ",") != strings.Join(want, ",") {
+			t.Errorf("%s carried %q, want %q: each session sends back only the cookie it was given", session, carried[session], want)
+		}
+	}
+}

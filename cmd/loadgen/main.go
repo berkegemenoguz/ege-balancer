@@ -52,6 +52,49 @@ type load struct {
 	// drawn from a Zipf distribution with this exponent, which is above 1.
 	// Zero draws them uniformly.
 	skew float64
+	// jar keeps the cookies each session is given, so that every session
+	// behaves as a browser of its own; nil keeps none.
+	jar *sessionJar
+}
+
+// sessionJar holds the cookies of every session. Sessions are shared between
+// workers, so it is guarded.
+type sessionJar struct {
+	mu      sync.Mutex
+	cookies map[string]map[string]*http.Cookie
+}
+
+// newSessionJar returns an empty jar.
+func newSessionJar() *sessionJar {
+	return &sessionJar{cookies: map[string]map[string]*http.Cookie{}}
+}
+
+// attach adds the session's cookies to a request.
+func (j *sessionJar) attach(session string, request *http.Request) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for _, cookie := range j.cookies[session] {
+		request.AddCookie(cookie)
+	}
+}
+
+// keep stores the cookies an answer set for the session, each replacing the
+// one of the same name.
+func (j *sessionJar) keep(session string, response *http.Response) {
+	set := response.Cookies()
+	if len(set) == 0 {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	kept := j.cookies[session]
+	if kept == nil {
+		kept = map[string]*http.Cookie{}
+		j.cookies[session] = kept
+	}
+	for _, cookie := range set {
+		kept[cookie.Name] = &http.Cookie{Name: cookie.Name, Value: cookie.Value}
+	}
 }
 
 // sessions returns what names the session of each request, for one worker:
@@ -80,6 +123,7 @@ func main() {
 	bodySize := flag.Int("body-size", 0, "bytes of body sent with every request")
 	keys := flag.Int("keys", 0, "client sessions to spread the requests over, named in X-Session; 0 names none")
 	skew := flag.Float64("zipf", 0, "draw the sessions from a Zipf distribution with this exponent, above 1, so that a few are far more popular; 0 draws them uniformly")
+	cookies := flag.Bool("cookies", false, "keep the cookies each session is given and send them back, as a browser would; needs keys")
 	label := flag.String("label", "", "label recorded with the result, such as the algorithm in force")
 	shape := flag.Bool("histogram", false, "also print the latency distribution")
 	out := flag.String("json", "", "also write the result as JSON to this file")
@@ -94,8 +138,14 @@ func main() {
 	if *skew != 0 && (*skew <= 1 || *keys == 0) {
 		log.Fatal("zipf must be above 1, and needs keys")
 	}
+	if *cookies && *keys == 0 {
+		log.Fatal("cookies needs keys: each session is a browser with cookies of its own")
+	}
 
 	traffic := load{url: *target + *path, method: strings.ToUpper(*method), keys: *keys, skew: *skew}
+	if *cookies {
+		traffic.jar = newSessionJar()
+	}
 	if *bodySize > 0 {
 		traffic.body = bytes.Repeat([]byte("x"), *bodySize)
 	}
@@ -228,6 +278,9 @@ func request(ctx context.Context, client *http.Client, shape load, session strin
 	}
 	if session != "" {
 		attempt.Header.Set(sessionHeader, session)
+		if shape.jar != nil {
+			shape.jar.attach(session, attempt)
+		}
 	}
 
 	// Go's client sends an idempotent request again, on a new connection, when
@@ -246,6 +299,9 @@ func request(ctx context.Context, client *http.Client, shape load, session strin
 	if err != nil {
 		into.recordFailure(failureKind(err))
 		return
+	}
+	if shape.jar != nil && session != "" {
+		shape.jar.keep(session, response)
 	}
 
 	read, err := io.Copy(io.Discard, response.Body)

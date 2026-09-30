@@ -61,7 +61,8 @@ distribution at one level.
   remembered. With more sessions than one backend can remember but fewer than the whole pool can,
   that share says how well an algorithm keeps a client on the backend that knows it. With `-zipf`,
   a few sessions send most of the requests, as popular users and hot keys do, which is what a bound
-  on consistent hashing's load is for.
+  on consistent hashing's load is for. With `-cookies`, every session keeps the cookies it is given,
+  so that sticky sessions see thirty thousand browsers rather than a hundred connections.
 - **The shape of the latency**, as a histogram in the JSON and, with `-histogram`, on the terminal.
   Percentiles hide whether a run has one hump or two, and under overload it has two.
 
@@ -80,6 +81,7 @@ Percentiles are by nearest rank over every recorded latency; nothing is sampled 
 | `-method` | GET | method of every request |
 | `-body-size` | 0 | bytes of body sent with every request |
 | `-keys` | 0 | client sessions to spread the requests over, named in `X-Session`; 0 names none |
+| `-cookies` | false | keep the cookies each session is given and send them back, as a browser would; needs `-keys` |
 | `-zipf` | 0 | draw the sessions from a Zipf distribution with this exponent, above 1, so that a few are far more popular; 0 draws them uniformly |
 | `-metrics` | `http://127.0.0.1:8081/metrics` | counters endpoint; empty to skip |
 | `-histogram` | off | also print the latency distribution |
