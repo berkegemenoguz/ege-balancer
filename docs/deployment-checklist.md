@@ -51,6 +51,9 @@ container registry as `vX.Y.Z` and `latest`, and publishes the release notes.
 - [ ] Under `consistent_hash`, the key is one every client sends — requests without it are placed
       by load — and the weights follow the backends' capacity, since the balance factor bounds
       requests in flight, which a slower backend holds more of
+- [ ] Under `sticky.mode: cookie`, `LB_STICKY_SECRET` is set, at least 32 characters, the same on
+      every balancer in front of the pool and kept out of version control; `sticky.secure` is on
+      when TLS is terminated in front of the balancer
 - [ ] `failure_policy` matches the priority: `retry_next_backend` for availability, `fail_fast`
       for latency, `circuit_breaker` to protect a struggling backend
 - [ ] Under `retry_next_backend`, `retry.budget_percent` is the extra load the backends can take

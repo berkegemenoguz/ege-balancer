@@ -7,14 +7,15 @@ backends leave the pool on their own and come back when they recover, failures a
 policy you choose, and the whole system can be watched through structured logs, Prometheus metrics
 and Grafana dashboards.
 
-> Status: v1.4.0. The twelve day plan was released as v1.0.0, and the releases since have added a
+> Status: v1.5.0. The twelve day plan was released as v1.0.0, and the releases since have added a
 > retry budget and least connections by the power of two choices (v1.1.0); liveness and readiness
 > endpoints, a container health check, profiled mock backends and three Grafana dashboards
 > (v1.2.0); a retry rule for requests that are not idempotent, with an identifier on every request
 > (v1.3.0); fixes for three defects that realistic mock backends exposed (v1.3.1); a fix for
-> clients that give up being counted against the backends (v1.3.2); and consistent hashing with
-> bounded loads, failure reasons and a Faults dashboard (v1.4.0). Everything below is implemented
-> and tested, except where *Out of scope* says otherwise.
+> clients that give up being counted against the backends (v1.3.2); consistent hashing with
+> bounded loads, failure reasons and a Faults dashboard (v1.4.0); and sticky sessions by a signed
+> cookie (v1.5.0). Everything below is implemented and tested, except where *Out of scope* says
+> otherwise.
 
 ## Contents
 
@@ -40,6 +41,8 @@ and Grafana dashboards.
   consistent hashing, which keeps every request with the same key — a header such as `X-Session`,
   or the client's address — on the same backend, moves as few keys as it can when the pool changes,
   and can bound each backend's load so that a popular key cannot overload one
+- **Sticky sessions**, over any algorithm: a signed cookie the balancer sets keeps a browser on the
+  backend that first answered it, and moves it only when that backend leaves the pool or fails
 - **Health checking**, active and passive: a periodic HTTP probe and the outcome of real traffic
   feed the same thresholds, so a backend leaves the pool as soon as either shows it failing
 - **Failure policies**: `retry_next_backend` (never twice to the same backend), `fail_fast`, and
@@ -63,8 +66,6 @@ and Grafana dashboards.
 
 - TLS termination and HTTP/2 — the balancer speaks plain HTTP
 - Distributed or multi-node balancing, and service discovery
-- Sticky sessions by a cookie the balancer sets — consistent hashing keeps a client on one backend
-  by a key the client sends itself
 
 ## Requirements
 
@@ -95,6 +96,7 @@ Actions
   3  stop a backend            4  start a backend
   5  change the algorithm      6  demonstrate the rate limit
   7  show the status           8  make a backend misbehave
+  9  sticky sessions on or off
   r  reset everything          q  quit
   ?  show this again
 ```
@@ -311,6 +313,22 @@ each backend at that percentage of its share of the requests in flight; 0 leaves
 The section may be present under any algorithm, as the shipped configurations have it, and is only
 read under its own.
 
+`sticky.mode: cookie` keeps a client on the backend that first answered it, over any algorithm. The
+answer carries a cookie, `sticky.cookie` (default `lb_backend`), that names the backend by an HMAC of
+its address, so it gives no address away and cannot be made for a backend the client was never sent
+to; the cookie is taken off the request before it reaches the backend. The secret it is signed with
+comes from the environment, not the file:
+
+```bash
+export LB_STICKY_SECRET="$(openssl rand -base64 32)"
+```
+
+It must be at least 32 characters. Without it the balancer makes one at start and warns: pins then
+last as long as the process, and a second balancer does not honour them. `sticky.max_age` keeps the
+cookie beyond the browser session, and `sticky.secure` belongs behind something that terminates TLS.
+A pinned client moves only when its backend leaves the pool or fails an attempt; load does not move
+it.
+
 A request that is not idempotent — POST, PATCH, or a method the balancer does not know — is retried
 only while nothing can have acted on it, which means the connection to the backend was never made.
 Once the request is on the wire the backend may have carried it out and answered into a connection
@@ -421,6 +439,13 @@ to 1.22 times the average in flight, against 3.8 times unbounded, and answered 2
 The bound counts requests in flight, which a slow backend holds more of, so it works best with
 weights proportional to capacity: that combination answered the most requests in every run. The
 details are in §10.9 of the technical design.
+
+**What sticky sessions are worth.** Round robin with sticky cookies, every session keeping its own,
+matched consistent hashing on every figure — 1,110 requests a second, a p50 of 21.2 ms, a 94.7% hit
+rate — without the client sending any key. They part when the pool changes: an eleventh backend
+added by a reload took 9.1% of the requests at once under consistent hashing, which cost six points
+of hit rate for a few seconds, and 0.4% under sticky sessions, which cost nothing and left it nearly
+idle. §10.10 of the technical design has the details.
 
 The [performance report](docs/performance-report.md) has both campaigns in full: the method, all
 fifty-four runs across six load levels, what happens when a backend is stopped or crashed mid-run,
