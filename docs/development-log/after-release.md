@@ -953,3 +953,76 @@ they do not remember costs 40 ms — so the answer could be a number rather than
 | Live, a backend killed | the survivors' hit rate 70% before, 73–74% after; no request failed |
 | Live, Zipf sessions | the busiest backend at 3.8 times the average in flight unbounded, 1.22 times at 125, with 24% more requests answered |
 | The whole suite with the race detector | green; `internal/balancer` at 99.3%, `internal/proxy` at 97.1% |
+
+## Sticky sessions
+
+**Why.** Consistent hashing keeps a client on one backend only if the client sends a key, and a
+browser sends none. Sticky sessions let the balancer give the client one: a cookie naming the
+backend that answered it first.
+
+### What was built
+
+- **An opt-in `sticky` section**: `mode` (`none` or `cookie`), `cookie`, `max_age` and `secure`,
+  validated at load and applied by a reload. It works over any algorithm; the algorithm places a
+  client's first request, and every request after it that carries the cookie goes to the same
+  backend for as long as that backend is among the candidates.
+- **The cookie** names a backend by the first 128 bits of an HMAC-SHA256 of its address. It is
+  `HttpOnly`, `SameSite=Lax`, scoped to `/`, `Secure` when asked, and taken off the request before
+  the request is forwarded; the client's other cookies reach the backend byte for byte.
+- **The secret** is read from `LB_STICKY_SECRET`, at least 32 characters, and made at start when it
+  is not set, with a warning. Compose passes it through from the shell that runs it.
+- **`lb_sticky_requests_total`**, by what the cookie did — pinned, new, repinned, unknown — on first
+  attempts only, created at zero; the sticky mode on `/status`; a row on the Backends dashboard.
+- **The tools.** `loadgen -cookies` gives every session a cookie jar of its own, so that thirty
+  thousand sessions are thirty thousand browsers. The console turns sticky sessions on and off, its
+  traffic keeps each session's cookie, and its prompt says when sticky sessions are on.
+
+### Decisions
+
+- **The secret is in the environment, not the file.** The configuration files are committed; a
+  secret in them would be public.
+- **A random secret rather than a refusal to start.** Sticky sessions still work on a single
+  balancer without one; the warning says what is lost.
+- **No bound on load.** Moving a pinned client moves its session, which is what the cookie exists to
+  prevent. Health checking, the circuit breaker, failed attempts and 5xx under `retry_on_5xx` are
+  what move a client.
+- **A pin outranks a consistent hash key.** The cookie says where the session is; the key only where
+  it would be placed.
+- **The token is the whole cookie.** No expiry or version inside it: `max_age` is the browser's
+  business, and a new secret simply makes every cookie unknown, which re-pins each client once.
+- **The secret reaches the proxy as an option** of its constructor, so the nineteen tests that build
+  a handler did not change.
+
+### What went wrong
+
+- **The first experiment would have measured nothing.** Its warm-up ran in one generator and its
+  measurement in another, and the cookies live in the generator: every session of the second run
+  would have arrived without one and been placed afresh. Caught before it ran; each warm-up and the
+  event after it now share a run.
+- **A test expected the wrong thing of `fail_fast`.** The integration tests' base configuration
+  fails fast, so the first request after a pinned backend died was answered 503, as it should be,
+  until health checking took the backend out. The test is about a retry re-pinning the client, and
+  now retries.
+- **A mutation check passed for the wrong reason.** Dropping the test of whether the pinned backend
+  is a candidate left an import unused, so the mutated code did not compile and no test ran. Written
+  so that it compiled, the mutation failed two tests.
+- **The metrics table had missed a metric.** `lb_hash_placements_total`, added with consistent
+  hashing, had not been added to the table in §8.1 of the technical design; it is there now, beside
+  `lb_sticky_requests_total`.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| The cookie | `HttpOnly`, `SameSite=Lax`, `Path=/`, no address in it; `Max-Age` and `Secure` when configured |
+| Pinning | a client stays on its first backend over round robin, and is not sent the cookie again |
+| Re-pinning | a backend out of the pool, a failed attempt, a cookie naming no backend — each re-pins the client, counted as repinned or unknown; a 5xx under `retry_on_5xx` pins nobody |
+| The client's other cookies | reach the backend byte for byte, and the sticky cookie does not; with sticky sessions off nothing is touched |
+| Reload | a pin survives it; sticky sessions turned on by a reload show on `/status` |
+| The secret | two balancers given the same `LB_STICKY_SECRET` honour each other's cookies; one under 32 characters stops the balancer at start |
+| Mutations | ignoring whether the pinned backend is a candidate, sending the cookie again, forwarding the cookie, a new secret on reload — each fails a test |
+| The console | its three edits of the shipped configuration round-trip to the same bytes |
+| Live, round robin with sticky cookies against consistent hashing | 1,110 against 1,099 requests a second; a hit rate of 94.7% for both |
+| Live, an eleventh backend joins | consistent hashing gave it 9.1% of the requests, the hit rate 94.3%, 88.0%, 92.0%; sticky sessions 0.4%, 94.5%, 96.9%, 97.5% |
+| Live, a backend dies under sticky sessions | 1,559 requests re-pinned, none failed; the survivors' hit rate 93.3%, then 85.9%, then 90.5% |
+| The whole suite with the race detector | green; `internal/proxy` at 97.5%, `internal/config` at 92.5% |
