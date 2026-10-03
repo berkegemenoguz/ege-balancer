@@ -7,15 +7,15 @@ backends leave the pool on their own and come back when they recover, failures a
 policy you choose, and the whole system can be watched through structured logs, Prometheus metrics
 and Grafana dashboards.
 
-> Status: v1.5.0. The twelve day plan was released as v1.0.0, and the releases since have added a
+> Status: v1.5.1. The twelve day plan was released as v1.0.0, and the releases since have added a
 > retry budget and least connections by the power of two choices (v1.1.0); liveness and readiness
 > endpoints, a container health check, profiled mock backends and three Grafana dashboards
 > (v1.2.0); a retry rule for requests that are not idempotent, with an identifier on every request
 > (v1.3.0); fixes for three defects that realistic mock backends exposed (v1.3.1); a fix for
 > clients that give up being counted against the backends (v1.3.2); consistent hashing with
-> bounded loads, failure reasons and a Faults dashboard (v1.4.0); and sticky sessions by a signed
-> cookie (v1.5.0). Everything below is implemented and tested, except where *Out of scope* says
-> otherwise.
+> bounded loads, failure reasons and a Faults dashboard (v1.4.0); sticky sessions by a signed
+> cookie (v1.5.0); and a fix for retries that took round robin turns (v1.5.1). Everything below is
+> implemented and tested, except where *Out of scope* says otherwise.
 
 ## Contents
 
