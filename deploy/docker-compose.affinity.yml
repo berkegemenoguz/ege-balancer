@@ -1,0 +1,10 @@
+# Overlay for the affinity measurements, scripts/measure-affinity.sh and
+# scripts/measure-pool-change.py: the balancer reads measurements/lb.affinity.yaml,
+# which those scripts write from configs/lb.measure.yaml for each configuration
+# they compare. The file lives under measurements/, which git ignores, so a
+# campaign leaves the repository as it found it. The scripts write the file
+# before they bring the stack up; started without it, Docker would mount an
+# empty directory in its place.
+services:
+  loadbalancer:
+    volumes: ["../measurements/lb.affinity.yaml:/etc/lb/config.yaml:ro"]

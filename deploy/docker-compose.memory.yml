@@ -1,0 +1,24 @@
+# Overlay that gives the ten mock backends a memory and nothing else: each
+# remembers 5,000 client sessions, named in X-Session, and a request whose
+# session it does not remember costs 40 ms more. Unlike the realistic overlay it
+# adds no faults, no cold start and no pauses, so that a measurement of
+# affinity measures affinity. scripts/measure-affinity.sh uses it for the pool
+# it calls memory.
+#
+#   docker compose -f deploy/docker-compose.yml \
+#                  -f deploy/docker-compose.memory.yml up -d
+x-memory: &memory
+  MOCK_CACHE_SIZE: "5000"
+  MOCK_MISS_PENALTY: 40ms
+
+services:
+  backend-1: { environment: *memory }
+  backend-2: { environment: *memory }
+  backend-3: { environment: *memory }
+  backend-4: { environment: *memory }
+  backend-5: { environment: *memory }
+  backend-6: { environment: *memory }
+  backend-7: { environment: *memory }
+  backend-8: { environment: *memory }
+  backend-9: { environment: *memory }
+  backend-10: { environment: *memory }
