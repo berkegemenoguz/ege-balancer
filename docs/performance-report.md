@@ -388,9 +388,14 @@ drops every open connection at once.
 | weighted round robin | crashed | 2,859/s (2,849–2,902) | 879.9 ms | 1.396 s | none | 18 (10–28) |
 | least connections | crashed | 2,913/s (2,874–3,002) | 879.4 ms | 1.411 s | none | 11 (6–12) |
 
-**Losing a backend under load costs between 6 and 28 retries, and no client-visible error.** Each
-run carries roughly 90,000 requests, so even the worst case is three retries in ten thousand. Under
-weighted round robin and least connections no client saw a 503 at all.
+**Losing a backend under load costs between 6 and 28 retries, and almost no client-visible error.**
+Each run carries roughly 90,000 requests, so even the worst case is three retries in ten thousand.
+Under weighted round robin and least connections no client saw a 503 at all. One request in one of
+the eighteen runs — least connections, drained — was still being answered when the client's
+ten-second timeout expired; the generator of the time counted an answer cut short as a success, and
+the table shows no failure. It has counted it as a failure since; the generator's
+[changes that affect the numbers](../cmd/loadgen/README.md#changes-that-affect-the-numbers) are
+listed with it.
 
 **A crash is barely worse than a planned drain.** The retries are within each other's ranges — 11
 against 11 for round robin, 18 against 12 for weighted round robin, 11 against 10 for least

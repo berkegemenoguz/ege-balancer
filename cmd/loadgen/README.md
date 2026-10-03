@@ -31,9 +31,14 @@ go run ./cmd/loadgen -connections 300 -duration 20s -label round_robin
 
 `scripts/measure.sh` drives the whole matrix — every algorithm at every load level, `REPEATS`
 times each — and samples `docker stats` alongside every run. `scripts/measure-failure.sh` takes a
-backend away in the middle of a run. `scripts/summarise.py` turns the results into the report's
-tables: the median of each cell with its range, the CPU each container used, and the latency
-distribution at one level.
+backend away in the middle of a run. `scripts/measure-affinity.sh` compares the configurations that
+keep a client on one backend with those that do not, on backends with or without a memory, and
+`scripts/measure-pool-change.py` adds or kills a backend part way through a run under them.
+`scripts/summarise.py` turns the results into the report's tables: the median of each cell with its
+range, the CPU each container used, and the latency distribution at one level.
+
+The scripts build the generator once with `go build` rather than `go run`: only a built binary
+carries the revision it was built from, and every result records it (below).
 
 ## What it measures, and how
 
@@ -87,3 +92,32 @@ Percentiles are by nearest rank over every recorded latency; nothing is sampled 
 | `-histogram` | off | also print the latency distribution |
 | `-label` | — | recorded with the result, such as the algorithm in force |
 | `-json` | — | also write the result as JSON to this file |
+
+## What a result records
+
+Besides the measurements, every result carries a `generator` object: the git revision the binary
+was built from, whether the tree had changes not yet committed, and every flag with its value,
+defaults included. A result can then be told apart from one made with other settings, or by a
+generator that has since changed. `go run` stamps no revision, so a result made that way says
+`unknown`. `scripts/summarise.py` names the generator under every table, and warns when a table
+mixes generators or includes runs built from uncommitted changes.
+
+A request that runs out of `-timeout` is a failure of kind `timeout`, like any other.
+
+## Changes that affect the numbers
+
+The generator has changed as the questions asked of it have. Most changes added something that is
+off unless asked for — sessions, a method and a body, skewed sessions, cookies — and leave earlier
+results comparable. These changed what an existing figure means:
+
+| Since | Change | Effect on earlier results |
+| --- | --- | --- |
+| 23 September 2026 | Throughput is divided by the measured window, not by the time the last request took to finish | the second campaign's throughput was understated by 2 to 5 per cent at the median, as the performance report says |
+| 23 September 2026 | An answer whose body fails to arrive is a failure, not a success | one request in the second campaign, answered at the ten-second timeout, was counted as a success |
+| 23 September 2026 | A request the client sends again on a new connection is counted | none: the backends of that campaign never closed a connection part way |
+| 3 October 2026 | A request that runs out of `-timeout` is a failure; it used to be set apart as cut off at the end of the run | none: no stored result has one |
+| 3 October 2026 | Every result records the generator's revision and flags | results made before carry no `generator`, and are reported as `unknown` |
+
+During a measurement campaign the generator is not changed. A fix found part way through means
+rerunning the cells measured before it.
+
