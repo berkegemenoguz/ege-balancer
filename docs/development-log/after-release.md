@@ -1149,3 +1149,79 @@ campaign, by one committed generator.
 | Repeats | three per cell, the configurations interleaved and their order rotated; the ranges in the tables are a few per cent |
 | The pool changes | every run with a new backend gave it its share under consistent hashing, 9.9% to 10.0%; no request failed in any of the twelve |
 | The results in the documents | the performance report, §10.9 and §10.10 of the technical design, and the README quote the campaign's medians, and mark what was not repeated |
+
+## Retries that took a round robin turn
+
+**Why.** Noticed while fixing the clients that give up, and left on the list of things deferred:
+under round robin, a retry moved the same counter as a first attempt. Taken up once the measurement
+campaigns were done, as v1.5.1.
+
+### What was wrong
+
+- **A retry took the next request's turn.** Round robin's counter is shared by every request, and a
+  retry called `Select` like a first attempt, moving it on by one. The turn it took belonged to
+  whichever request came next, so every failure of a backend cost the backend after it in the pool
+  its turn.
+- **A failing backend was offered more than its share.** With three backends and the middle one
+  failing every attempt, it was offered half of the requests and the last one only retries; over
+  ten, the backend after the failing one was never offered a request first. A backend failing every attempt
+  leaves the pool after three failures; one failing some of its requests stays in, and keeps taking
+  its neighbour's turns.
+- **It fades under concurrency.** A failure comes back after other requests have started, so the
+  turn its retry takes falls on whichever backend is next by then, and the lost turns spread over
+  the pool. It shows most where requests arrive one at a time: light traffic, and the demo's three
+  backends. In the code since v1.0.0.
+
+### What was done
+
+- `balancer.RetryStrategy` is a strategy that takes turns and chooses a retry without taking one.
+  Round robin implements it: a retry reads the counter and goes to the backend it falls on among
+  those the request has not tried.
+- The proxy chooses a retry through it when the strategy implements it, and by `Select` otherwise.
+
+### Decisions
+
+- **Read the turn rather than go to the next backend in order.** Sending a failing backend's
+  retries to the one after it would have doubled that backend's load for as long as the other
+  failed. Reading the counter spreads them: over ten backends with one failing every attempt, the
+  other nine served its hundred retries within one of each other.
+- **Weighted round robin was left alone.** Its credit charges a retry to the backend that serves
+  it, which gives the credit back in later turns, so the failing backend keeps its share of first
+  attempts. A simulation of both strategies showed this before any code changed, and a test now
+  holds it: weights 3, 1 and 1 with the heavy backend failing every attempt still offer it exactly
+  300 of 500 requests first. Reading its state without charging, as round robin now does, sent
+  every retry to the same backend in the simulation.
+- **An interface beside the strategy, as `KeyedStrategy` is.** Least connections and consistent
+  hashing hold no turns and needed no change; the proxy asks only whether a strategy takes them.
+- **A patch release.** No configuration changes, and nothing changes but where round robin's
+  retries land and which backend the next request reaches. The published numbers stand: round robin
+  retried between 10 and 16 times in about 90,000 requests in each run of the failure campaign, and
+  not once in the affinity campaign.
+
+### What went wrong
+
+- **The first live sample was too small.** Twenty seconds of one client is under 600 requests,
+  since every tenth waits on the slow backend. The difference showed — 7.8% against about 10% — but
+  a point either way is within chance at that size, so the runs were lengthened to 90 seconds.
+- **The weighted round robin test first expected an exact split of the retries.** The first
+  attempts are exact, but the smooth order serves the retries three at a time to each backend, so at
+  500 requests they split 151 and 149. The test asks for an even split to within a few, which is the
+  property, and keeps the exact count for first attempts.
+- **The live comparison needed the failing backend to stay in the pool.** At the shipped threshold
+  of three failures in a row, a backend failing 30% of its requests drops out every fifty attempts
+  or so and returns seconds later. The experiment's configuration, kept outside the repository,
+  raised the threshold to ten.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| A retry under round robin, three backends, the middle one failing | the request after it reaches the third backend, whose turn it was |
+| Ten backends, one failing every attempt, 1,000 requests through the strategy | every backend first offered exactly 100; the other nine served the 100 retries within one of each other |
+| The same with a retry taking a turn again | the backend after the failing one first offered none, the others 111 or 112 |
+| Through the proxy, three backends, the middle one answering 500 under `retry_on_5xx`, 30 requests | the failing backend offered 10, the others serving 15 each; with the proxy's change reverted, 15, and 23 and 7 |
+| Weighted round robin, weights 3, 1, 1, the heavy backend failing every attempt | first attempts exactly 300, 100 and 100 of 500 |
+| Live, ten mocks, `backend-2` answering 30% of requests with a 500, one client for 90 s — before | `backend-3` received 7.5% of the attempts, the others 10.0% to 10.5% |
+| The same, after | every backend between 9.7% and 10.1% |
+| The same at ten connections, before and after | 9.7% to 10.3%, then 9.7% to 10.2%: nothing beyond the noise |
+| The whole suite with the race detector | green; `internal/balancer` at 99.3% of statements, `internal/proxy` at 97.5% |
