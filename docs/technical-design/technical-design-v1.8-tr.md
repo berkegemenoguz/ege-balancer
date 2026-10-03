@@ -7,7 +7,7 @@
 | Yazar | Berk Egemen Oğuz |
 | Tarih | 11 Eylül 2026 |
 | Sürüm | 1.8 — v1.6'nın ve v1.7 revizyon notlarının yerini alır |
-| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2), profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8), gerçekçi mock backend'lerin ortaya çıkarıp v1.3.1'de düzeltilen üç hata ve v1.3.2'de düzeltilen, vazgeçen istemcilerin backend'lerin hanesine yazılması (§11.1) sınırlı yüklü consistent hashing (§5.5, §10.9) ve imzalı bir cookie ile sticky session (§5.6, §10.10) |
+| Durum | v1.0.0 sürümünü ve sonrasındaki işleri anlatır: regresyon korumalı benchmark'lar, retry budget, power of two choices (§5.4), canlılık ve hazır olma uçları (§8.2), idempotent olmayan istekler için retry kuralı (§6.3), istek kimlikleri (§8.2), profilli backend'lere karşı ikinci ölçüm kampanyası (§10.8), gerçekçi mock backend'lerin ortaya çıkarıp v1.3.1'de düzeltilen üç hata ve v1.3.2'de düzeltilen, vazgeçen istemcilerin backend'lerin hanesine yazılması (§11.1), sınırlı yüklü consistent hashing (§5.5, §10.9), imzalı bir cookie ile sticky session (§5.6, §10.10) ve v1.5.1'de düzeltilen, retry'ların round robin sırası alması (§11.1) |
 | Kod | `github.com/berkegemenoguz/ege-balancer` |
 | Dil | Türkçe. Aynı içerikteki İngilizce sürüm: [technical-design-v1.8-en.md](technical-design-v1.8-en.md) |
 
@@ -260,7 +260,7 @@ Paylaşılan durum, nasıl kullanıldığına göre korunur:
 
 | Durum | Koruma | Neden |
 | --- | --- | --- |
-| Round robin konumu | tek bir atomik sayaç | seçim başına tek bir artırım |
+| Round robin konumu | tek bir atomik sayaç | ilk deneme başına tek bir artırım; bir retry onu yalnızca okur (§5.1) |
 | Backend başına uçuştaki istek | `Backend` üzerinde atomik sayaç | least connections okur, her istek yazar |
 | Backend ağırlığı | `Backend` üzerinde atomik | okunurken yenileme ile değişir (§11.1) |
 | Weighted round robin kredisi | mutex | tüm havuz üzerinde oku-değiştir-yaz |
@@ -292,13 +292,20 @@ Tüm stratejiler `LBStrategy`'yi gerçekler. Proxy çekirdeği önce havuzu sağ
 bu isteğin henüz denemediği backend'lere daraltır; strateji bunlar arasından seçer. Filtrelemenin
 stratejilerin dışında tutulması, her stratejiyi kendisine verilen havuzun saf bir fonksiyonu olarak
 bırakır. Consistent hashing ayrıca, bir isteği taşıdığı bir anahtara göre yerleştiren
-`KeyedStrategy`'yi de gerçekler (§5.5).
+`KeyedStrategy`'yi (§5.5), round robin ise bir retry'ı sıra almadan seçen `RetryStrategy`'yi
+gerçekler (§5.1).
 
 ### 5.1 Round robin
 
 Her seçimde tek bir atomik sayaç artırılır ve havuz boyutuna göre modu alınır. Seçim O(1) ve
 kilitsizdir. Backend'ler eşit olduğunda doğru seçimdir ve kesindir: on backend üzerinde, onun katı
 sayıda istek eşit bölünür.
+
+Bir retry sıra almaz. Sayaç bütün isteklerce paylaşılır, bu yüzden bir retry'ın aldığı sıra bir
+sonraki isteğin sırası olurdu: v1.5.1'den önce bir backend'in her hatası, havuzda ondan sonra gelen
+backend'e sırasını kaybettiriyor, hatalı backend'e de payından fazlası sunuluyordu (§11.1). Bir retry
+artık sayacı artırmadan okur ve isteğin denemediği backend'ler arasında sayacın denk geldiğine
+gider; sıralar ilerledikçe retry'lar havuza yayılır.
 
 ### 5.2 Smooth weighted round robin
 
@@ -315,6 +322,11 @@ olmadığından testler istatistiksel değil kesindir — 1, 2 ve 3 ağırlıkla
 olarak 200, 400 ve 600'e bölünür. Kredi adrese göre tutulur; böylece backend'ler havuzdan çıkıp geri
 döndükçe stratejiye sunulan havuz değişse de anlamını korur. Bedeli, bir mutex altında havuzun
 taranmasıdır: seçim başına O(n) (§10.4).
+
+Bir retry, isteğin denemediği backend'ler arasından aynı seçimle belirlenir ve diğer her seçim gibi
+hesaba yazılır: onu karşılayan backend krediyi sonraki sıralarda geri verir. Bu yüzden hata veren bir
+backend ilk denemelerdeki payını korur ve weighted round robin'in, round robin'in retry yöntemine
+benzer bir şeye ihtiyacı yoktur (§5.1).
 
 ### 5.3 Least connections
 
@@ -1272,6 +1284,25 @@ tuttu. Gitmiş bir istemci artık ne bir backend'in hanesine yazılıyor ne de r
 üreteci aynı davranışla §10.8'deki kampanyada karşılaşmış ve işçilerini düzgünce durduracak biçimde
 değiştirilmişti; yük dengeleyici ise olduğu gibi bırakılmıştı. Araçtaki bir geçici çözüm üründeki bir
 hatayı gizlemişti.
+
+v1.5.1'de düzeltilen beşinci bir hata, dördüncüsü düzeltilirken fark edilmiş ve sonraya
+bırakılmıştı: round robin altında bir retry, ilk deneme gibi bir sıra alıyordu. Sıralar bütün
+isteklerce paylaşıldığından, bir retry'ın aldığı sıra bir sonraki isteğindi. Bir backend her hata
+verdiğinde havuzda ondan sonra gelen backend sırasını kaybediyor, hatalı backend'e de payından
+fazlası sunuluyordu: üç backend'den ortadaki her denemede hata verdiğinde isteklerin yarısı ona
+sunuluyor, sonuncusuna yalnızca retry'lar düşüyordu; düzeltme geri alındığında bir test bunu yeniden
+üretir.
+Yukarıdaki karşılaştırmada her isteğin takılan backend'den başlamasının nedeni de buydu. Her
+denemede hata veren bir backend üç hatadan sonra havuzdan çıkar (§10.8), ama isteklerinin bir
+kısmında hata veren biri havuzda kalır. On mock backend üzerinde, biri isteklerinin %30'una 500 ile
+cevap verirken, `retry_on_5xx` açıkken ve havuzda kalsın diye sağlıksızlık eşiği ona çıkarılmışken,
+istekleri art arda gönderen tek bir istemci 90 saniyede ondan sonraki backend'e denemelerin %7,5'ini,
+diğerlerinin her birine %10,0 ile %10,5 arasını verdi; düzeltmeyle her backend %9,7 ile %10,1
+arasında aldı. Eşzamanlı yük altında etki silikleşir: bir hata, başka istekler başladıktan sonra
+döner ve retry'ının aldığı sıra o ana kadar sırası gelmiş backend'e düşer. On bağlantıda aynı
+karşılaştırma gürültünün ötesinde bir fark göstermedi. Bir retry artık sırayı almadan okur. Weighted
+round robin'de bu hata hiç olmadı, çünkü kredisi bir retry'ı onu karşılayan backend'in hesabına
+yazar (§5.2); bir test bunu güvence altına alır.
 
 ### 11.2 Tasarımın yanıldığı yerler ve bunun faydası
 
