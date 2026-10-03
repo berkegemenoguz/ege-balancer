@@ -1,7 +1,8 @@
 // Package balancer defines the LBStrategy interface and its implementations:
 // round robin, least connections, weighted round robin and consistent hashing,
-// which also places requests by key through KeyedStrategy. The active strategy
-// is selected through configuration.
+// which also places requests by key through KeyedStrategy. Round robin chooses
+// a retry through RetryStrategy. The active strategy is selected through
+// configuration.
 package balancer
 
 import (
@@ -71,6 +72,18 @@ type LBStrategy interface {
 	Select(backends []*Backend) (*Backend, error)
 	// Name is the identifier the strategy is configured under.
 	Name() string
+}
+
+// RetryStrategy is a strategy that takes turns, and chooses a retry without
+// taking one. The turns are shared by every request: a retry that took one
+// would take it from the next request, and the backend after one that keeps
+// failing would lose its turn every time the other failed. A strategy without
+// turns chooses a retry by Select.
+type RetryStrategy interface {
+	LBStrategy
+	// SelectRetry returns the backend for a retry among backends, which leave
+	// out the ones the request has tried, and leaves the turns as they were.
+	SelectRetry(backends []*Backend) (*Backend, error)
 }
 
 // New builds the strategy named by the configured algorithm. hash configures

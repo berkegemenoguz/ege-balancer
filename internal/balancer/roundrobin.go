@@ -29,6 +29,17 @@ func (r *RoundRobin) Select(backends []*Backend) (*Backend, error) {
 	return backends[index], nil
 }
 
+// SelectRetry returns the backend for a retry: the one the next turn falls on
+// among backends, without taking the turn. The backends the request has tried
+// are not among them, so the retry goes elsewhere, the next request still gets
+// the turn it was due, and retries spread over the pool as the turns move on.
+func (r *RoundRobin) SelectRetry(backends []*Backend) (*Backend, error) {
+	if len(backends) == 0 {
+		return nil, ErrNoBackends
+	}
+	return backends[r.next.Load()%uint64(len(backends))], nil
+}
+
 // Name identifies the strategy in configuration and logs.
 func (r *RoundRobin) Name() string {
 	return string(config.RoundRobin)
