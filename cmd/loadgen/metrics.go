@@ -10,11 +10,14 @@ import (
 	"strings"
 )
 
-// reasonPattern picks the reason out of a rejection counter's labels.
-var reasonPattern = regexp.MustCompile(`reason="([^"]+)"`)
+// labelPattern picks the one label value out of a counter's labels: the reason
+// of a rejection, the placement of a consistently hashed request, or what a
+// sticky cookie did.
+var labelPattern = regexp.MustCompile(`(?:reason|placement|result)="([^"]+)"`)
 
 // counters is what the balancer says about its own work at one moment: the
-// retries it has sent and the requests it refused itself, by reason.
+// retries it has sent, the requests it refused itself, by reason, and where
+// consistent hashing and sticky sessions placed requests.
 type counters map[string]float64
 
 // scrapeCounters reads those counters from a Prometheus endpoint. Taking them
@@ -38,7 +41,7 @@ func scrapeCounters(ctx context.Context, client *http.Client, url string) (count
 	return parseCounters(response.Body)
 }
 
-// parseCounters reads the two counters the report quotes out of a metrics
+// parseCounters reads the counters the report quotes out of a metrics
 // exposition, under short names.
 func parseCounters(body interface{ Read([]byte) (int, error) }) (counters, error) {
 	found := counters{}
@@ -60,14 +63,21 @@ func parseCounters(body interface{ Read([]byte) (int, error) }) (counters, error
 		case name == "lb_retries_total":
 			found["retries"] += value
 		case strings.HasPrefix(name, "lb_rejected_requests_total{"):
-			reason := reasonPattern.FindStringSubmatch(name)
-			if reason == nil {
-				continue
-			}
-			found["refused "+reason[1]] += value
+			found.add("refused ", name, value)
+		case strings.HasPrefix(name, "lb_hash_placements_total{"):
+			found.add("placed ", name, value)
+		case strings.HasPrefix(name, "lb_sticky_requests_total{"):
+			found.add("sticky ", name, value)
 		}
 	}
 	return found, lines.Err()
+}
+
+// add counts value under prefix and the label value of name.
+func (c counters) add(prefix, name string, value float64) {
+	if label := labelPattern.FindStringSubmatch(name); label != nil {
+		c[prefix+label[1]] += value
+	}
 }
 
 // splitSample separates a sample line into its name with labels and its value.

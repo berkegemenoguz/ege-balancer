@@ -10,12 +10,16 @@ const exposition = `# HELP lb_retries_total Retries sent to another backend.
 lb_retries_total 37
 lb_rejected_requests_total{reason="no_healthy_backend"} 84
 lb_rejected_requests_total{reason="retry_budget_exhausted"} 75
+lb_hash_placements_total{placement="home"} 900
+lb_hash_placements_total{placement="overloaded"} 40
+lb_sticky_requests_total{result="pinned"} 120
+lb_sticky_requests_total{result="repinned"} 3
 lb_requests_total{backend="backend-1:5678",status="200"} 5
 lb_backend_healthy{backend="backend-1:5678"} 1
 not a sample at all
 `
 
-func TestParseCountersReadsRetriesAndRefusals(t *testing.T) {
+func TestParseCountersReadsWhatTheReportQuotes(t *testing.T) {
 	got, err := parseCounters(strings.NewReader(exposition))
 	if err != nil {
 		t.Fatalf("parsing failed: %v", err)
@@ -25,9 +29,13 @@ func TestParseCountersReadsRetriesAndRefusals(t *testing.T) {
 		"retries":                        37,
 		"refused no_healthy_backend":     84,
 		"refused retry_budget_exhausted": 75,
+		"placed home":                    900,
+		"placed overloaded":              40,
+		"sticky pinned":                  120,
+		"sticky repinned":                3,
 	}
 	if len(got) != len(want) {
-		t.Errorf("read %v, want only the retries and the refusals", got)
+		t.Errorf("read %v, want only the retries, refusals, placements and sticky results", got)
 	}
 	for name, value := range want {
 		if got[name] != value {
