@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -152,6 +151,7 @@ func main() {
 
 	summary := run(traffic, *metrics, *connections, *warmup, *duration, *timeout)
 	summary.Algorithm = *label
+	summary.Generator = describeGenerator(flag.CommandLine)
 
 	fmt.Print(summary.text())
 	if *shape {
@@ -321,9 +321,10 @@ func request(ctx context.Context, client *http.Client, shape load, session strin
 // reported next to a refused connection as if they were the same problem.
 func failureKind(err error) string {
 	switch {
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// The run ended while this request was in flight.
-		return "cancelled"
+	// The client's own timeout. Its error also matches
+	// context.DeadlineExceeded, which once stood for a request the run cut off;
+	// no request is cut off any more, since the workers finish the one they are
+	// on, so a timeout is a timeout and counts among the failures.
 	case os.IsTimeout(err):
 		return "timeout"
 	case strings.Contains(err.Error(), "connection refused"):
@@ -355,6 +356,13 @@ func (r result) text() string {
 		title += " · " + r.Algorithm
 	}
 	fmt.Fprintf(&out, "%s\n", title)
+	if r.Generator.Revision != "" {
+		modified := ""
+		if r.Generator.Modified {
+			modified = ", with changes not committed"
+		}
+		fmt.Fprintf(&out, "  generator  %.12s%s\n", r.Generator.Revision, modified)
+	}
 	fmt.Fprintf(&out, "  requests   %d (%.0f/s, %.1f MB/s)\n", r.Requests, r.Throughput, r.MegabytesPS)
 	fmt.Fprintf(&out, "  latency    p50 %s   p95 %s   p99 %s   max %s\n", r.P50, r.P95, r.P99, r.Max)
 	fmt.Fprintf(&out, "  statuses   %s\n", counts(r.Statuses))
@@ -366,10 +374,7 @@ func (r result) text() string {
 		fmt.Fprintf(&out, "  client     %d requests sent again by the client on a new connection\n", r.ClientRetries)
 	}
 	if r.Failures > 0 {
-		fmt.Fprintf(&out, "  failures   %d — %s\n", r.Failures, named(withoutCancelled(r.FailureKind)))
-	}
-	if r.CutOff > 0 {
-		fmt.Fprintf(&out, "  cut off    %d in flight when the run ended\n", r.CutOff)
+		fmt.Fprintf(&out, "  failures   %d — %s\n", r.Failures, named(r.FailureKind))
 	}
 	if len(r.Counters) > 0 {
 		fmt.Fprintf(&out, "  balancer   %s\n", named(r.Counters))
@@ -378,18 +383,6 @@ func (r result) text() string {
 		fmt.Fprintf(&out, "  backends   %s\n", shares(r.Backends, r.Requests))
 	}
 	return out.String()
-}
-
-// withoutCancelled drops the requests the run cut off, which are reported on
-// their own line rather than among the failures.
-func withoutCancelled(kinds map[string]int) map[string]int {
-	rest := make(map[string]int, len(kinds))
-	for kind, n := range kinds {
-		if kind != cancelled {
-			rest[kind] = n
-		}
-	}
-	return rest
 }
 
 // histogramText renders the latency distribution as a bar per band, which is

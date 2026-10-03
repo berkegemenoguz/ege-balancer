@@ -1,9 +1,10 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -23,8 +24,6 @@ func TestFailureKindSeparatesTheCauses(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"run ended", context.Canceled, "cancelled"},
-		{"deadline", context.DeadlineExceeded, "cancelled"},
 		{"timed out", timeoutError{}, "timeout"},
 		{"nothing listening", errors.New("dial tcp 127.0.0.1:1: connect: connection refused"), "connection refused"},
 		{"peer reset", &net.OpError{Op: "read", Err: errors.New("connection reset by peer")}, "connection reset"},
@@ -37,6 +36,27 @@ func TestFailureKindSeparatesTheCauses(t *testing.T) {
 				t.Errorf("failureKind(%v) = %q, want %q", test.err, got, test.want)
 			}
 		})
+	}
+}
+
+// TestTheClientsOwnTimeoutIsATimeout uses a real client and a real timeout:
+// the error Go returns for it also matches context.DeadlineExceeded, which a
+// synthetic error would not show.
+func TestTheClientsOwnTimeoutIsATimeout(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+	}))
+	defer slow.Close()
+
+	_, err := (&http.Client{Timeout: 20 * time.Millisecond}).Get(slow.URL)
+	if err == nil {
+		t.Fatal("the request did not time out")
+	}
+	if got := failureKind(err); got != "timeout" {
+		t.Errorf("failureKind(%v) = %q, want timeout", err, got)
 	}
 }
 

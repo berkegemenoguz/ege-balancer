@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"testing"
 	"time"
 )
@@ -95,5 +96,22 @@ func TestWithoutSessionsThereIsNoCacheToReport(t *testing.T) {
 
 	if got := summarise(all, 1, time.Second); got.Cache != nil {
 		t.Errorf("cache = %+v, want none reported when no answer mentioned it", got.Cache)
+	}
+}
+
+func TestAResultSaysWhatProducedIt(t *testing.T) {
+	set := flag.NewFlagSet("loadgen", flag.ContinueOnError)
+	set.Int("keys", 0, "")
+	set.Bool("cookies", false, "")
+	if err := set.Parse([]string{"-keys", "30000"}); err != nil {
+		t.Fatal(err)
+	}
+
+	described := describeGenerator(set)
+	if described.Revision == "" {
+		t.Error("the revision is empty, want it, or unknown when none was stamped")
+	}
+	if described.Flags["keys"] != "30000" || described.Flags["cookies"] != "false" {
+		t.Errorf("flags = %v, want every flag with its value, defaults included", described.Flags)
 	}
 }

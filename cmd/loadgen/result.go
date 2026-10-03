@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"time"
@@ -89,13 +91,8 @@ func (s *samples) merge(other *samples) {
 	}
 }
 
-const (
-	// cancelled is the failure kind of a request the run itself cut off at the
-	// deadline. It is reported apart from the failures the balancer caused.
-	cancelled = "cancelled"
-	// cutOff is the failure kind of an answer that began and did not finish.
-	cutOff = "answer cut off"
-)
+// cutOff is the failure kind of an answer that began and did not finish.
+const cutOff = "answer cut off"
 
 // result is one finished run, in the shape the report quotes.
 type result struct {
@@ -104,7 +101,6 @@ type result struct {
 	Duration      string         `json:"duration"`
 	Requests      int            `json:"requests"`
 	Failures      int            `json:"failures"`
-	CutOff        int            `json:"cut_off_at_the_deadline"`
 	ClientRetries int            `json:"sent_again_by_the_client,omitempty"`
 	Throughput    float64        `json:"throughput_per_second"`
 	MegabytesPS   float64        `json:"megabytes_per_second"`
@@ -119,6 +115,36 @@ type result struct {
 	Statuses      map[int]int    `json:"statuses"`
 	Backends      map[string]int `json:"backends"`
 	FailureKind   map[string]int `json:"failure_kinds,omitempty"`
+	Generator     generator      `json:"generator"`
+}
+
+// generator says what produced a result: the generator's revision, whether it
+// was built from a tree with changes not yet committed, and every flag it was
+// run with, defaults included. A result can then be told apart from one made
+// with other settings, or by a generator that has since changed.
+type generator struct {
+	Revision string            `json:"revision"`
+	Modified bool              `json:"modified,omitempty"`
+	Flags    map[string]string `json:"flags"`
+}
+
+// describeGenerator reads the revision stamped into the binary and the flags
+// in set. The revision is stamped by go build from a git checkout, not by go
+// run, so the measurement scripts build the generator before using it.
+func describeGenerator(set *flag.FlagSet) generator {
+	described := generator{Revision: "unknown", Flags: map[string]string{}}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				described.Revision = setting.Value
+			case "vcs.modified":
+				described.Modified = setting.Value == "true"
+			}
+		}
+	}
+	set.VisitAll(func(f *flag.Flag) { described.Flags[f.Name] = f.Value.String() })
+	return described
 }
 
 // summarise turns the merged samples of a run into a result.
@@ -126,10 +152,7 @@ func summarise(all *samples, connections int, took time.Duration) result {
 	slices.Sort(all.latencies)
 
 	failures := 0
-	for kind, n := range all.failures {
-		if kind == cancelled {
-			continue
-		}
+	for _, n := range all.failures {
 		failures += n
 	}
 
@@ -148,7 +171,6 @@ func summarise(all *samples, connections int, took time.Duration) result {
 		Duration:      took.Round(time.Millisecond).String(),
 		Requests:      len(all.latencies),
 		Failures:      failures,
-		CutOff:        all.failures[cancelled],
 		ClientRetries: all.clientRetries,
 		Throughput:    float64(len(all.latencies)) / seconds,
 		MegabytesPS:   float64(all.bytes) / seconds / (1 << 20),

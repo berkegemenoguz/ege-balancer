@@ -246,3 +246,22 @@ func TestEverySessionKeepsItsOwnCookies(t *testing.T) {
 		}
 	}
 }
+
+func TestARequestThatTimesOutIsAFailure(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+	}))
+	defer backend.Close()
+
+	got := run(load{url: backend.URL, method: http.MethodGet}, "", 2, 0, 150*time.Millisecond, 30*time.Millisecond)
+
+	if got.Failures == 0 || got.FailureKind["timeout"] != got.Failures {
+		t.Errorf("failures %d %v, want every request that ran out of time counted as a timeout", got.Failures, got.FailureKind)
+	}
+	if got.Requests != 0 {
+		t.Errorf("%d requests recorded as answered, want none", got.Requests)
+	}
+}
