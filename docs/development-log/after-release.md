@@ -1026,3 +1026,68 @@ backend that answered it first.
 | Live, an eleventh backend joins | consistent hashing gave it 9.1% of the requests, the hit rate 94.3%, 88.0%, 92.0%; sticky sessions 0.4%, 94.5%, 96.9%, 97.5% |
 | Live, a backend dies under sticky sessions | 1,559 requests re-pinned, none failed; the survivors' hit rate 93.3%, then 85.9%, then 90.5% |
 | The whole suite with the race detector | green; `internal/proxy` at 97.5%, `internal/config` at 92.5% |
+
+## The load generator, before the last campaign
+
+**Why.** The generator had changed on five days, and before the campaign that is to settle the
+numbers a review of its history asked whether it could still be trusted. Most of the changes had
+added something off by default and left earlier results comparable; the review found what had not.
+
+### What was wrong
+
+- **A timeout was not a failure.** Go's client reports its own timeout with an error that also
+  matches `context.DeadlineExceeded`, and the generator checked for that first, filing the request
+  under a category meant for requests the run itself cut off — and no request has been cut off since
+  the workers began finishing the one they are on. A request that ran out of time was therefore
+  reported apart, as cut off at the deadline, and not counted among the failures. The test of the
+  classification used a made-up error, which matched what the code assumed rather than what Go
+  does. No stored result has such a request, so no published figure was affected.
+- **One published claim was slightly wrong.** One run of the failure experiment holds a request
+  answered with 200 at 10.0001 seconds, the client's timeout: an answer whose body ran out of time,
+  counted as a success by the generator of the time. The performance report said that losing a
+  backend caused no client-visible error.
+- **Results did not say how they were made.** A result recorded its label, its connections and its
+  window, but not the generator's revision or the sessions, cookies, method or warm-up it ran with.
+- **The last two measurements could not be reproduced.** The scripts behind §10.9 and §10.10 of the
+  technical design lived in a temporary folder, the same mistake the day 10 driver had made, and by
+  this review the folder had already lost the results of the first of them.
+
+### What was done
+
+- A timeout is a failure of kind `timeout`; the category for requests cut off at the end of the run
+  is gone. The test uses a real client and a real timeout.
+- Every result carries a `generator` object: the revision, whether the tree had uncommitted
+  changes, and every flag with its value. The scripts build the generator with `go build`, which
+  stamps the revision, instead of `go run`, which does not.
+- The generator reads the balancer's consistent hashing placements and sticky results along with
+  its retries and refusals.
+- The affinity measurements are committed: `scripts/configure.py` writes each configuration they
+  compare, `scripts/measure-affinity.sh` runs them on a pool with or without a memory, and
+  `scripts/measure-pool-change.py` adds or kills a backend part way through a run. Two overlays go
+  with them: `deploy/docker-compose.memory.yml`, a cache and nothing else, and
+  `deploy/docker-compose.affinity.yml`, which points the balancer at the configuration the scripts
+  write under `measurements/`, so that a campaign changes nothing in the repository.
+- `scripts/summarise.py` has a table for each, and under every table names the generator that made
+  the runs, warning when they come from more than one or from uncommitted changes.
+- The performance report's claim is corrected, and the generator's README lists the changes that
+  affect the numbers.
+
+### Decisions
+
+- **Freeze the generator for the campaign.** A fix found part way through means rerunning what was
+  measured before it; the summariser's warning is what makes a mixed campaign visible.
+- **Record the flags, not a version number.** A number would have to be bumped by hand; the
+  revision and the flags are read from the binary and the command line.
+- **A memory without faults.** The realistic overlay also hangs, drops and pauses; measuring
+  affinity on it would measure those too.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| A real client timeout | classified as `timeout` and counted among the failures; with the old order of checks restored, both tests fail |
+| A run against a backend slower than the timeout | every request a failure of kind `timeout`, none answered |
+| The stamp | a built generator records its revision and marks a tree with uncommitted changes; every flag is recorded with its value |
+| The seven configurations | each written by `scripts/configure.py` loads and validates; with `--without backend-6`, nine backends |
+| The summariser | the original matrix unchanged; the new tables built from earlier results, which it reports as made by an unknown generator |
+| The whole suite with the race detector | green; lint clean |
