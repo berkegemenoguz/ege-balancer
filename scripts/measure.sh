@@ -40,20 +40,7 @@ if [ ${#algorithms[@]} -eq 0 ]; then
 fi
 
 mkdir -p "$results"
-
-# ready waits until the balancer has a healthy backend to send traffic to, so a
-# run never starts while the pool is still recovering from the one before it.
-ready() {
-  for _ in $(seq 1 60); do
-    if curl -sf "$status/readyz" >/dev/null; then
-      return 0
-    fi
-    sleep 0.5
-  done
-
-  echo "the balancer never reported itself ready" >&2
-  exit 1
-}
+build_loadgen
 
 # sample records what each container is doing, every two seconds, until it is
 # killed. The balancer reads its own counters, so this is only about resources.
@@ -87,7 +74,7 @@ for repeat in $(seq 1 "$repeats"); do
       sample "$run.stats.csv" &
       sampler=$!
 
-      go run ./cmd/loadgen \
+      "$loadgen" \
         -addr "http://$target" \
         -connections "$count" \
         -duration "$duration" \

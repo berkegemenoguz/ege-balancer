@@ -45,6 +45,7 @@ if [ ${#algorithms[@]} -eq 0 ]; then
 fi
 
 mkdir -p "$results"
+build_loadgen
 
 # whole waits until the balancer sees every backend healthy again, so the next
 # algorithm does not start a backend short.
@@ -67,7 +68,7 @@ for algorithm in "${algorithms[@]}"; do
     whole
 
       echo "== $algorithm: $victim $taken ${kill_after}s in (run $repeat)"
-    go run ./cmd/loadgen \
+    "$loadgen" \
       -connections "$connections" \
       -duration "$duration" \
       -warmup "$warmup" \
