@@ -76,6 +76,30 @@ func TestWeightedRoundRobinMatchesTheConfiguredRatio(t *testing.T) {
 	}
 }
 
+// TestWeightedRoundRobinKeepsItsRatioThroughRetries is why weighted round
+// robin chooses a retry by Select, unlike round robin: the retry is charged to
+// the backend that serves it, the credit pays it back, and the failing backend
+// still gets its share of first attempts.
+func TestWeightedRoundRobinKeepsItsRatioThroughRetries(t *testing.T) {
+	const requests = 500
+
+	backends := weighted(3, 1, 1)
+	first, retried := failingEveryAttempt(t, NewWeightedRoundRobin(), backends, backends[0], requests)
+
+	// Weights 3, 1 and 1 out of 5 mean 300, 100 and 100 first attempts, and
+	// the 300 retries of a split by the equal weights of b and c. The smooth
+	// order serves the retries three at a time to each, so the two are within a
+	// few of each other rather than exactly equal.
+	for _, backend := range backends {
+		if want := requests * backend.Weight() / 5; first[backend.Addr] != want {
+			t.Errorf("%s was first offered %d requests, want exactly %d", backend.Addr, first[backend.Addr], want)
+		}
+	}
+	if b, c := retried["b"], retried["c"]; b+c != 300 || max(b, c)-min(b, c) > 4 {
+		t.Errorf("b and c served %d and %d retries, want 300 split evenly", b, c)
+	}
+}
+
 func TestWeightedRoundRobinTreatsEqualWeightsAsRoundRobin(t *testing.T) {
 	backends := weighted(1, 1, 1)
 

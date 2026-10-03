@@ -14,6 +14,11 @@ import (
 // Compared to picking a backend at random in proportion to its weight, this
 // hits the configured ratio exactly and spreads the heavier backend's turns
 // across the cycle instead of bunching them together.
+//
+// Unlike round robin, it chooses a retry by Select and is not a RetryStrategy:
+// the backend that serves a retry is charged for it like any other selection,
+// and pays it back in turns it gives up later, so a failing backend keeps its
+// share of first attempts.
 type WeightedRoundRobin struct {
 	// Selection is a read-modify-write over the whole pool, so it is guarded by
 	// a mutex rather than by atomics.
