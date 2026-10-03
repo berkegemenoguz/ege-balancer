@@ -206,6 +206,47 @@ func TestFivexxIsRetriedWhenConfigured(t *testing.T) {
 	}
 }
 
+// TestRetriesLeaveRoundRobinsTurnsAlone is the regression test for retries
+// that took a round robin turn: every failure of the middle backend took the
+// next turn from the last one, which was then never offered a request first,
+// while the failing backend was offered half of them.
+func TestRetriesLeaveRoundRobinsTurnsAlone(t *testing.T) {
+	const requests = 30
+
+	var failed int
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		failed++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+
+	var first, last int
+	backends := []*balancer.Backend{
+		echoBackend(t, "backend-1", &first),
+		{Addr: strings.TrimPrefix(failing.URL, "http://")},
+		echoBackend(t, "backend-3", &last),
+	}
+
+	cfg := retryingConfig()
+	cfg.RetryOn5xx = true
+
+	handler := New(cfg, balancer.NewRoundRobin(), backends, allHealthy, testMetrics())
+	for range requests {
+		if response := send(handler, httptest.NewRequest(http.MethodGet, "/", nil)); response.Code != http.StatusOK {
+			t.Fatalf("status = %d, want every request answered by a working backend", response.Code)
+		}
+	}
+
+	// Each backend is offered a third of the requests first, and the ten that
+	// fail on the middle one are retried on the other two in turn.
+	if failed != requests/3 {
+		t.Errorf("the failing backend was offered %d requests, want %d", failed, requests/3)
+	}
+	if first != 15 || last != 15 {
+		t.Errorf("the working backends served %d and %d requests, want 15 each", first, last)
+	}
+}
+
 func TestRetriedRequestKeepsItsBody(t *testing.T) {
 	var received string
 	backend := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
