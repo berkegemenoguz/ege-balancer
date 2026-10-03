@@ -41,11 +41,12 @@ least connections each answer 72% more requests with none refused. We also show 
 connections loses its signal — an overloaded backend that refuses instantly holds nothing in flight,
 and so looks idle. Last, consistent hashing by weighted rendezvous hashing keeps a client on the
 backend that remembers it: against backends caching 5,000 of 30,000 sessions each, it raised the hit
-rate from 13% to 95% and the requests answered by 89% over round robin, and a bound on each
+rate from 15% to 90% and the requests answered by 73% over round robin, and a bound on each
 backend's load held the busiest backend to 1.22 times the average under skewed traffic (§10.9).
-Sticky sessions by a signed cookie matched it on round robin without the client sending any key; and
-where consistent hashing moved an eleventh of the sessions to a backend that joined, sticky sessions
-moved none, leaving the new backend nearly idle (§10.10).
+Sticky sessions by a signed cookie, over least connections, answered 2.2 times as many requests as
+round robin with 93.5% of them remembered, without the client sending any key; and where consistent
+hashing gave a backend that joined its tenth of the sessions at once, sticky sessions moved none,
+leaving the new backend nearly idle (§10.10).
 
 ---
 
@@ -429,8 +430,8 @@ m is the number in flight across the candidates and W their total weight; a key 
 at its bound goes to the next backend in its order that is not. The bounds add up to at least m+1,
 so some backend always has room. This is consistent hashing with bounded loads [21], as HAProxy's
 `hash-balance-factor` and Envoy's `hash_balance_factor` implement it. It is off by default, as in
-both. The shipped configurations set 150, which on the unequal pool of §9.4 measured better than 125
-on every count (§10.9).
+both. The shipped configurations set 150, which on the unequal pool of §9.4, with its equal weights,
+measured better than 125 on every count (§10.9).
 
 The bound reads load as requests in flight, and a slower backend holds more of them for the same
 rate of requests (Little's law [12]). With equal weights over unequal backends, the bound therefore
@@ -1075,13 +1076,14 @@ milliseconds, where the active probe would have needed up to six seconds.
 
 ### 10.9 Consistent hashing against backends that remember
 
-**Setup.** The ten profiled backends of §9.4 ran on the host, each remembering 5,000 sessions, with
-a miss costing 40 ms; hangs, drops, pauses and cold starts were off. The generator held 40
-connections, and every request named one of 30,000 sessions in `X-Session` — more than one backend
-can remember, fewer than the pool can. Before each run with uniform sessions the caches were
-cleared; 90 seconds of warm-up were discarded and 30 measured. There was one run per
-configuration, not three: the effects below are many times the few per cent that separated
-repeated runs in §10.8, and differences as small as that are not claimed.
+**How it was measured.** First in single runs, on the ten profiled backends of §9.4 run on the host,
+with scripts that were not kept; then in a campaign — the third in the performance report — that
+repeats every cell three times with scripts in the repository, on the Compose environment of §10.8,
+and with one generator revision for every run. The figures below are the campaign's medians, except
+where a table says otherwise. Each backend remembers 5,000 sessions and a miss costs 40 ms; hangs,
+drops, pauses and cold starts are off. Every request names one of 30,000 sessions in `X-Session` —
+more than one backend can remember, fewer than the pool can. Before each run the caches are cleared
+and warmed for a minute; 20 seconds are measured, at 50 connections.
 
 **Hypotheses, written before measuring.**
 
@@ -1096,57 +1098,62 @@ repeated runs in §10.8, and differences as small as that are not claimed.
 
 | Configuration | Answered | p50 | p99 | Hit rate | Moved by the bound |
 | --- | --- | --- | --- | --- | --- |
-| round robin | 580 req/s | 58.1 ms | 264.5 ms | 13.4% | — |
-| consistent hashing, unbounded | 1,099 req/s | 21.4 ms | 241.4 ms | 94.7% | none |
-| consistent hashing, 150 | 1,178 req/s | 21.6 ms | 181.0 ms | 83.4% | 18% |
-| consistent hashing, 125 | 1,000 req/s | 28.4 ms | 181.8 ms | 67.9% | 35% |
-| consistent hashing, 125, weights by capacity | 1,302 req/s | 20.5 ms | 130.5 ms | 81.4% | 18% |
+| round robin | 738 req/s | 57.6 ms | 266.3 ms | 15.0% | — |
+| consistent hashing, unbounded | 1,278 req/s | 22.4 ms | 249.5 ms | 90.2% | none |
+| consistent hashing, 150 | 1,442 req/s | 22.0 ms | 186.6 ms | 83.7% | 13% |
+| consistent hashing, 125, weights by capacity | 1,557 req/s | 21.7 ms | 127.8 ms | 77.5% | 21% |
 
-The first hypothesis holds. Keeping each session on one backend raised the hit rate from 13% to 95%,
-took the miss penalty off most requests, cut the median from 58 to 21 ms, and let the same
-connections carry 89% more requests. The hit rate falls short of 100% because a session seen for
-the first time in the window misses once; round robin's falls short of 17% because two minutes did
-not fill its caches.
+The first hypothesis holds. Keeping each session on one backend raised the hit rate from 15% to 90%,
+took the miss penalty off most requests, cut the median from 58 to 22 ms, and let the same
+connections carry 73% more requests. The hit rate falls short of 100% because a session seen for
+the first time misses once, and a minute of warm-up does not see every session.
 
 What the hypotheses did not foresee is the bound's cost on an unequal pool. The bound reads load
 as requests in flight, and the slow backend, answering in 80 ms where the fast ones take 15, holds
-more of them for the same share of requests. With equal weights the bound took it for an overloaded
-backend: at 125 it moved 35% of requests off their backend, the slow one ended with 3.5% of the
-traffic instead of 10%, and the sessions moved missed where they landed, which made those backends
-slower in turn. At 150 the bound moved half as many and kept the hit rate at 83%, with more
+more of them for the same share of requests. Unbounded with equal weights, consistent hashing sent
+that backend 10% of the traffic, as round robin does; the bound takes it for an overloaded backend
+and moves its sessions. At 150 it moved 13% of requests, kept 84% remembered, and gave more
 throughput and a shorter tail than no bound at all. Weights proportional to capacity — 4 for the
-fast backends, 2 for the medium, 1 for the slow, as in §10.8 — gave the most throughput and the
-shortest tail of all. The shipped configurations, whose weights are equal, set 150 accordingly.
+fast backends, 2 for the medium, 1 for the slow, as in §10.8 — with a bound of 125 gave the most
+throughput and the shortest tail, at 78% remembered, and sent the slow backend only 0.8% of the
+traffic, below the 3% its capacity is worth. A single run at 125 with equal weights moved 35% of
+requests and kept only 68% remembered, which is why the shipped configurations, whose weights are
+equal, set 150.
 
-**A backend lost.** With the caches warm and a bound of 125, backend-4 was killed ten seconds into a
-run. The survivors' hit rate was 70% before and 73–74% after, and no request failed: the second
-hypothesis holds. Only backend-4's sessions moved, each to the same next backend every time.
+**A backend lost.** With the caches warm, backend-4 was killed eighty seconds into a run under
+unbounded consistent hashing. The hit rate was 91.2% before, 85.6% in the three seconds after and
+90.9% in the twenty-two after that, and no request failed: the second hypothesis holds. Only
+backend-4's sessions moved, each to the same next backend every time, and each missed once there.
 
-**Skewed sessions.** The same 30,000 sessions drawn from a Zipf distribution of exponent 1.1,
-where the most popular session alone sends 14% of the requests and the hundred most popular 61%;
-10 seconds of warm-up and 30 measured, with the caches as the previous run left them.
+**Skewed sessions.** One run each, on the host, not repeated in the campaign. The same 30,000
+sessions drawn from a Zipf distribution of exponent 1.1, where the most popular session alone sends
+14% of the requests and the hundred most popular 61%; 10 seconds of warm-up and 30 measured, with
+the caches as the previous run left them.
 
-| Configuration | Answered | p99 | Hit rate | Busiest backend in flight |
+| Configuration, one run each | Answered | p99 | Hit rate | Busiest backend in flight |
 | --- | --- | --- | --- | --- |
 | consistent hashing, unbounded | 1,098 req/s | 253.8 ms | 96.9% | 3.81 × the average |
 | consistent hashing, 125 | 1,366 req/s | 159.0 ms | 92.9% | 1.22 × |
 | consistent hashing, 150 | 1,395 req/s | 169.5 ms | 95.3% | 1.44 × |
 | consistent hashing, 125, weights by capacity | 1,646 req/s | 114.3 ms | 96.2% | 1.51 ×, on a backend of weight 4 |
 
-The third hypothesis holds. Unbounded, the busiest backend held 3.8 times the average in flight; at
-125 it held 1.22 times, within its bound, for four points of hit rate, 24% more requests answered and
-a p99 37% lower. With weights by capacity the busiest backend is a fast one whose bound is larger,
-and the pool answered half as many requests again as without a bound.
+The third hypothesis holds in these runs. Unbounded, the busiest backend held 3.8 times the average
+in flight; at 125 it held 1.22 times, within its bound, for four points of hit rate, 24% more
+requests answered and a p99 37% lower. With weights by capacity the busiest backend is a fast one
+whose bound is larger, and the pool answered half as many requests again as without a bound.
 
 ### 10.10 Sticky sessions against consistent hashing
 
-**Setup.** As in §10.9: ten profiled backends on the host, 5,000 sessions remembered each, a miss
-costing 40 ms, 30,000 uniform sessions from 40 connections, caches cleared before each run, one run
-per configuration. With `loadgen -cookies` every session keeps the cookies it is given, so the
-balancer sees 30,000 browsers. The generator holds the cookies, so each warm-up and the event that
-follows it happen in one run; a second run would arrive with none.
+**How it was measured.** As in §10.9, with every session keeping the cookies it is given, so the
+balancer sees 30,000 browsers. The single runs put sticky sessions over round robin; the campaign put
+them over least connections, which places each session's first request away from busy backends. For
+the pool changes, backend-6 was left out of the pool and added by a reload, or backend-4 was killed,
+eighty seconds into a run, and the hit rate was read from the backends over the fifteen seconds
+before, the three after and the twenty-two after that. The generator holds the cookies, so the
+warm-up and the event happen in one run; a second run would arrive with none.
 
-**Hypotheses, written before measuring.**
+**Hypotheses, written before measuring,** for single runs in which an eleventh backend joined ten;
+in the campaign a tenth joins nine, and a tenth of the sessions is due to it.
 
 1. Round robin with sticky cookies reaches the hit rate of consistent hashing: each session's first
    request lands anywhere, and every later one where the first did.
@@ -1159,26 +1166,34 @@ follows it happen in one run; a second run would arrive with none.
 
 | Configuration | Answered | p50 | p99 | Hit rate |
 | --- | --- | --- | --- | --- |
-| round robin with sticky cookies | 1,110 req/s | 21.2 ms | 240.9 ms | 94.7% |
-| consistent hashing, unbounded (§10.9) | 1,099 req/s | 21.4 ms | 241.4 ms | 94.7% |
+| sticky sessions over least connections | 1,611 req/s | 19.8 ms | 180.5 ms | 93.5% |
+| consistent hashing, unbounded | 1,278 req/s | 22.4 ms | 249.5 ms | 90.2% |
+| round robin, for comparison | 738 req/s | 57.6 ms | 266.3 ms | 15.0% |
 
-| An eleventh backend joins by a reload | Hit rate before; in the 3 s after; in the 22 s after that | Requests the new backend took |
+| A backend joins by a reload | Hit rate before; in the 3 s after; in the 22 s after that | Requests the new backend took |
 | --- | --- | --- |
-| consistent hashing, unbounded | 94.3%, 88.0%, 92.0% | 9.1% |
-| round robin with sticky cookies | 94.5%, 96.9%, 97.5% | 0.4% |
+| consistent hashing, unbounded | 90.2%, 84.8%, 90.5% | 9.9% |
+| sticky sessions over least connections | 94.0%, 96.2%, 98.1% | 0.8% |
 
-All three hypotheses hold. With a cookie, round robin kept every session where it began and matched
-consistent hashing on every figure, without the client sending a key. The difference shows when the
-pool changes. Consistent hashing gave the new backend 9.1% of the requests — an eleventh is 9.09% —
-and paid for it with a dip of six points while those sessions missed there. Sticky sessions paid
-nothing and moved nothing, and the new backend stood nearly idle, with 0.4% of the requests: it gets
-a share only as new clients arrive or old pins break. Neither is wrong: one balances the pool at
-once, the other keeps every session warm.
+| A backend is killed | Hit rate before; in the 3 s after; in the 22 s after that | Failed requests |
+| --- | --- | --- |
+| consistent hashing, unbounded | 91.2%, 85.6%, 90.9% | none |
+| sticky sessions over least connections | 94.6%, 86.7%, 92.7% | none |
 
-When backend-4 was killed part way through a sticky run, 1,559 requests found their backend gone and
-were re-pinned, and no request failed. The survivors' hit rate went from 93.3% before to 85.9% in
-the next three seconds and 90.5% in the twenty after: their own sessions kept their pins, and the dip
-is the moved sessions missing once where they landed.
+All three hypotheses hold. With a cookie, every session stayed where it began, without the client
+sending a key: in the single runs over round robin, sticky sessions matched consistent hashing on
+every figure — 1,110 against 1,099 requests a second, 94.7% remembered by both — and in the campaign,
+over least connections, they passed it, with 93.5% remembered and 26% more requests answered. The
+difference is the first placement: least connections kept the slow backend to 4.5% of the traffic,
+where consistent hashing with equal weights sent it 10%.
+
+The difference that matters shows when the pool changes. Consistent hashing gave the new backend
+9.9% of the requests — a tenth was due — and paid for it with a dip of five points while those
+sessions missed there. Sticky sessions paid nothing and moved nothing, and the new backend stood
+nearly idle, with 0.8% of the requests: it gets a share only as new clients arrive or old pins
+break. Neither is wrong: one balances the pool at once, the other keeps every session warm. When a
+backend died, both moved only its sessions, no request failed, and the hit rate dipped by five to
+eight points for the three seconds in which the moved sessions missed once.
 
 ---
 
@@ -1285,7 +1300,7 @@ CI runners vary by several per cent, which is why only bytes and allocations are
 - **Single node.** Rate limits, circuit state and the retry budget are per process; several balancer
   instances would each enforce their own.
 - **Sticky sessions do not rebalance.** A backend added to the pool receives only clients it has not
-  seen, 0.4% of the requests in §10.10, until pins break. Consistent hashing moves its share at once,
+  seen, 0.8% of the requests in §10.10, until pins break. Consistent hashing moves its share at once,
   at a cost in hit rate. A pin that expires, through `sticky.max_age`, is one way to let the pool
   even out over time.
 - **Log shipping and alerting** (Loki, Alertmanager) were deferred from v1.0 and are still absent.

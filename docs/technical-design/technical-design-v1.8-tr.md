@@ -41,12 +41,12 @@ oranlı ağırlıklar ve least connections %72 daha fazla isteği hiç ret verme
 connections'ın sinyalini nerede yitirdiğini de gösteriyoruz: anında reddeden aşırı yüklü bir backend
 uçuşta hiçbir istek tutmadığı için boşta görünür. Son olarak ağırlıklı rendezvous hashing ile
 consistent hashing, bir istemciyi onu hatırlayan backend'de tutar: her biri 30.000 oturumun
-5.000'ini önbelleğe alan backend'lere karşı isabet oranını %13'ten %95'e, cevaplanan istekleri round
-robin'e göre %89 artırdı; her backend'in yüküne konan bir sınır da çarpık trafikte en meşgul
-backend'i ortalamanın 1,22 katında tuttu (§10.9). İmzalı bir cookie ile sticky session, istemci
-hiçbir anahtar göndermeden round robin üzerinde onu yakaladı; ve consistent hashing katılan bir
-backend'e oturumların on birde birini taşırken sticky session hiçbirini taşımadı ve yeni backend'i
-neredeyse boşta bıraktı (§10.10).
+5.000'ini önbelleğe alan backend'lere karşı isabet oranını %15'ten %90'a, cevaplanan istekleri round
+robin'e göre %73 artırdı; her backend'in yüküne konan bir sınır da çarpık trafikte en meşgul
+backend'i ortalamanın 1,22 katında tuttu (§10.9). İmzalı bir cookie ile sticky session, least
+connections üzerinde, istemci hiçbir anahtar göndermeden round robin'in 2,2 katı istek cevapladı ve
+bunların %93,5'i hatırlandı; consistent hashing katılan bir backend'e oturumların onda birini hemen
+verirken sticky session hiçbirini taşımadı ve yeni backend'i neredeyse boşta bıraktı (§10.10).
 
 ---
 
@@ -436,7 +436,8 @@ Backend'i sınırında olan bir anahtar, sırasında sınırında olmayan bir so
 Sınırların toplamı en az m+1 olduğu için her zaman yeri olan bir backend vardır. Bu, HAProxy'nin
 `hash-balance-factor`'ı ve Envoy'un `hash_balance_factor`'ı gibi, sınırlı yüklü consistent
 hashing'dir [21]. İkisinde olduğu gibi varsayılan olarak kapalıdır. Dağıtılan yapılandırmalar 150
-kullanır; bu değer §9.4'ün eşit olmayan havuzunda her ölçütte 125'ten iyi çıktı (§10.9).
+kullanır; bu değer §9.4'ün eşit olmayan havuzunda, eşit ağırlıklarıyla, her ölçütte 125'ten iyi
+çıktı (§10.9).
 
 Sınır yükü uçuştaki istek sayısı olarak okur ve daha yavaş bir backend aynı istek hızında daha fazla
 isteği uçuşta tutar (Little yasası [12]). Eşit olmayan backend'ler üzerinde eşit ağırlıklarla sınır
@@ -1090,13 +1091,14 @@ aktif probe'un fark etmesi altı saniyeye kadar sürebilirdi.
 
 ### 10.9 Hatırlayan backend'lere karşı consistent hashing
 
-**Düzenek.** §9.4'ün on profilli backend'i makinenin kendisinde çalıştı; her biri 5.000 oturum
-hatırlıyordu ve bir ıska 40 ms'ye mal oluyordu. Takılma, düşme, duraklama ve soğuk başlangıç
-kapalıydı. Üreteç 40 bağlantı tuttu ve her istek `X-Session`'da 30.000 oturumdan birini adlandırdı —
-tek bir backend'in hatırlayabileceğinden fazla, havuzun hatırlayabileceğinden az. Düzgün oturumlu her
-koşudan önce önbellekler temizlendi; 90 saniyelik ısınma atıldı, 30 saniye ölçüldü. Her yapılandırma
-üç kez değil bir kez koşuldu: aşağıdaki etkiler, §10.8'de tekrarlanan koşuları ayıran birkaç yüzdenin
-çok katıdır ve o kadar küçük farklar iddia edilmez.
+**Nasıl ölçüldü.** Önce tek koşularla, makinenin kendisinde çalışan §9.4'ün on profilli backend'i
+üzerinde ve saklanmayan betiklerle; ardından bir kampanyayla — performans raporundaki üçüncüsü —
+her hücreyi depodaki betiklerle, §10.8'in Compose ortamında ve her koşu için tek bir üreteç
+sürümüyle üç kez tekrarlayarak. Aşağıdaki değerler, bir tablo aksini söylemedikçe kampanyanın
+medyanlarıdır. Her backend 5.000 oturum hatırlar ve bir ıska 40 ms'ye mal olur; takılma, düşme,
+duraklama ve soğuk başlangıç kapalıdır. Her istek `X-Session`'da 30.000 oturumdan birini adlandırır —
+tek bir backend'in hatırlayabileceğinden fazla, havuzun hatırlayabileceğinden az. Her koşudan önce
+önbellekler temizlenir ve bir dakika ısıtılır; 50 bağlantıda 20 saniye ölçülür.
 
 **Ölçmeden önce yazılan hipotezler.**
 
@@ -1111,58 +1113,63 @@ koşudan önce önbellekler temizlendi; 90 saniyelik ısınma atıldı, 30 saniy
 
 | Yapılandırma | Cevaplanan | p50 | p99 | İsabet oranı | Sınırın taşıdığı |
 | --- | --- | --- | --- | --- | --- |
-| round robin | 580 istek/s | 58,1 ms | 264,5 ms | %13,4 | — |
-| consistent hashing, sınırsız | 1.099 istek/s | 21,4 ms | 241,4 ms | %94,7 | hiç |
-| consistent hashing, 150 | 1.178 istek/s | 21,6 ms | 181,0 ms | %83,4 | %18 |
-| consistent hashing, 125 | 1.000 istek/s | 28,4 ms | 181,8 ms | %67,9 | %35 |
-| consistent hashing, 125, kapasiteye göre ağırlıklar | 1.302 istek/s | 20,5 ms | 130,5 ms | %81,4 | %18 |
+| round robin | 738 istek/s | 57,6 ms | 266,3 ms | %15,0 | — |
+| consistent hashing, sınırsız | 1.278 istek/s | 22,4 ms | 249,5 ms | %90,2 | hiç |
+| consistent hashing, 150 | 1.442 istek/s | 22,0 ms | 186,6 ms | %83,7 | %13 |
+| consistent hashing, 125, kapasiteye göre ağırlıklar | 1.557 istek/s | 21,7 ms | 127,8 ms | %77,5 | %21 |
 
-İlk hipotez tutar. Her oturumu tek bir backend'de tutmak isabet oranını %13'ten %95'e çıkardı, ıska
-cezasını isteklerin çoğunun üzerinden kaldırdı, medyanı 58'den 21 ms'ye indirdi ve aynı bağlantıların
-%89 daha fazla istek taşımasını sağladı. İsabet oranı %100'ün altında kalır, çünkü pencerede ilk kez
-görülen bir oturum bir kez ıskalar; round robin'inki %17'nin altında kalır, çünkü iki dakika
-önbelleklerini doldurmadı.
+İlk hipotez tutar. Her oturumu tek bir backend'de tutmak isabet oranını %15'ten %90'a çıkardı, ıska
+cezasını isteklerin çoğunun üzerinden kaldırdı, medyanı 58'den 22 ms'ye indirdi ve aynı bağlantıların
+%73 daha fazla istek taşımasını sağladı. İsabet oranı %100'ün altında kalır, çünkü ilk kez görülen bir
+oturum bir kez ıskalar ve bir dakikalık ısınma her oturumu görmez.
 
 Hipotezlerin öngörmediği şey, sınırın eşit olmayan bir havuzdaki bedelidir. Sınır yükü uçuştaki istek
 olarak okur ve hızlıların 15 ms'de cevapladığı yerde 80 ms'de cevaplayan yavaş backend, aynı istek
-payı için bunlardan daha fazlasını tutar. Eşit ağırlıklarla sınır onu aşırı yüklü bir backend sandı:
-125'te isteklerin %35'ini backend'lerinden taşıdı, yavaş backend trafiğin %10'u yerine %3,5'iyle
-kaldı ve taşınan oturumlar vardıkları yerde ıskaladı; bu da o backend'leri sırayla yavaşlattı. 150'de
-sınır bunun yarısını taşıdı ve isabet oranını %83'te tuttu; sınırsızdan daha fazla throughput ve
-daha kısa bir kuyrukla. Kapasiteyle orantılı ağırlıklar — §10.8'deki gibi hızlılar için 4, ortalar
-için 2, yavaş için 1 — hepsinden fazla throughput'u ve en kısa kuyruğu verdi. Ağırlıkları eşit olan
-dağıtılan yapılandırmalar buna göre 150 kullanır.
+payı için bunlardan daha fazlasını tutar. Sınırsız ve eşit ağırlıklarla consistent hashing o
+backend'e, round robin'in yaptığı gibi trafiğin %10'unu gönderdi; sınır ise onu aşırı yüklü bir
+backend sanar ve oturumlarını taşır. 150'de isteklerin %13'ünü taşıdı, %84'ünü hatırlanır tuttu ve
+sınırsızdan daha fazla throughput ve daha kısa bir kuyruk verdi. Kapasiteyle orantılı ağırlıklar —
+§10.8'deki gibi hızlılar için 4, ortalar için 2, yavaş için 1 — ve 125'lik bir sınır, %78 hatırlanma
+ile en fazla throughput'u ve en kısa kuyruğu verdi; yavaş backend'e ise kapasitesinin değeri olan %3'ün
+altında, trafiğin yalnızca %0,8'ini gönderdi. Eşit ağırlıklarla 125'te tek bir koşu isteklerin %35'ini
+taşıdı ve yalnızca %68'ini hatırlanır tuttu; ağırlıkları eşit olan dağıtılan yapılandırmaların 150
+kullanmasının nedeni budur.
 
-**Bir backend kaybı.** Önbellekler sıcakken ve sınır 125'teyken backend-4 bir koşunun onuncu
-saniyesinde öldürüldü. Hayatta kalanların isabet oranı önce %70, sonra %73–74'tü ve hiçbir istek
-başarısız olmadı: ikinci hipotez tutar. Yalnızca backend-4'ün oturumları taşındı; her biri her
-seferinde aynı sonraki backend'e.
+**Bir backend kaybı.** Önbellekler sıcakken, sınırsız consistent hashing altında backend-4 bir
+koşunun sekseninci saniyesinde öldürüldü. İsabet oranı önce %91,2, sonraki üç saniyede %85,6, onu
+izleyen yirmi iki saniyede %90,9'du ve hiçbir istek başarısız olmadı: ikinci hipotez tutar. Yalnızca
+backend-4'ün oturumları taşındı; her biri her seferinde aynı sonraki backend'e ve orada bir kez
+ıskaladı.
 
-**Çarpık oturumlar.** Aynı 30.000 oturum, üssü 1,1 olan bir Zipf dağılımından çekildi; en popüler
-oturum tek başına isteklerin %14'ünü, en popüler yüzü %61'ini gönderir. 10 saniye ısınma ve 30
-saniye ölçüm; önbellekler bir önceki koşunun bıraktığı gibiydi.
+**Çarpık oturumlar.** Makinede birer koşu; kampanyada tekrarlanmadı. Aynı 30.000 oturum, üssü 1,1
+olan bir Zipf dağılımından çekildi; en popüler oturum tek başına isteklerin %14'ünü, en popüler yüzü
+%61'ini gönderir. 10 saniye ısınma ve 30 saniye ölçüm; önbellekler bir önceki koşunun bıraktığı
+gibiydi.
 
-| Yapılandırma | Cevaplanan | p99 | İsabet oranı | En meşgul backend, uçuşta |
+| Yapılandırma, birer koşu | Cevaplanan | p99 | İsabet oranı | En meşgul backend, uçuşta |
 | --- | --- | --- | --- | --- |
 | consistent hashing, sınırsız | 1.098 istek/s | 253,8 ms | %96,9 | ortalamanın 3,81 katı |
 | consistent hashing, 125 | 1.366 istek/s | 159,0 ms | %92,9 | 1,22 katı |
 | consistent hashing, 150 | 1.395 istek/s | 169,5 ms | %95,3 | 1,44 katı |
 | consistent hashing, 125, kapasiteye göre ağırlıklar | 1.646 istek/s | 114,3 ms | %96,2 | 1,51 katı, ağırlığı 4 olan bir backend'de |
 
-Üçüncü hipotez tutar. Sınırsızken en meşgul backend uçuşta ortalamanın 3,8 katını tuttu; 125'te,
-sınırının içinde, 1,22 katını; karşılığında isabet oranından dört puan verdi, %24 daha fazla istek
-cevaplandı ve p99 %37 düştü. Kapasiteye göre ağırlıklarla en meşgul backend, sınırı daha büyük olan
-hızlılardan biridir ve havuz sınırsız haline göre bir buçuk kat istek cevapladı.
+Üçüncü hipotez bu koşularda tutar. Sınırsızken en meşgul backend uçuşta ortalamanın 3,8 katını tuttu;
+125'te, sınırının içinde, 1,22 katını; karşılığında isabet oranından dört puan verdi, %24 daha fazla
+istek cevaplandı ve p99 %37 düştü. Kapasiteye göre ağırlıklarla en meşgul backend, sınırı daha büyük
+olan hızlılardan biridir ve havuz sınırsız haline göre bir buçuk kat istek cevapladı.
 
 ### 10.10 Consistent hashing'e karşı sticky session
 
-**Düzenek.** §10.9'daki gibi: makinede on profilli backend, her biri 5.000 oturum hatırlıyor, bir
-ıska 40 ms'ye mal oluyor, 40 bağlantıdan 30.000 düzgün oturum, her koşudan önce temizlenen
-önbellekler, her yapılandırma için bir koşu. `loadgen -cookies` ile her oturum kendisine verilen
-cookie'leri tutar; böylece yük dengeleyici 30.000 tarayıcı görür. Cookie'leri üreteç tuttuğu için her
-ısınma ve ardından gelen olay tek bir koşuda olur; ikinci bir koşu hiç cookie'siz gelirdi.
+**Nasıl ölçüldü.** §10.9'daki gibi; her oturum kendisine verilen cookie'leri tutar, böylece yük
+dengeleyici 30.000 tarayıcı görür. Tek koşular sticky session'ı round robin üzerine koydu; kampanya
+ise her oturumun ilk isteğini meşgul backend'lerden uzağa yerleştiren least connections üzerine.
+Havuz değişiklikleri için backend-6 havuzun dışında bırakılıp bir yenilemeyle eklendi ya da backend-4
+bir koşunun sekseninci saniyesinde öldürüldü; isabet oranı backend'lerden olaydan önceki on beş,
+sonraki üç ve onu izleyen yirmi iki saniye boyunca okundu. Cookie'leri üreteç tuttuğu için ısınma ve
+olay tek bir koşuda olur; ikinci bir koşu hiç cookie'siz gelirdi.
 
-**Ölçmeden önce yazılan hipotezler.**
+**Ölçmeden önce yazılan hipotezler;** on birinci bir backend'in ona katıldığı tek koşular için.
+Kampanyada onuncu bir backend dokuza katılır ve oturumların onda biri ona düşer.
 
 1. Sticky cookie'li round robin consistent hashing'in isabet oranına ulaşır: her oturumun ilk isteği
    herhangi bir yere düşer, sonrakilerin her biri ilkinin düştüğü yere.
@@ -1176,26 +1183,34 @@ cookie'leri tutar; böylece yük dengeleyici 30.000 tarayıcı görür. Cookie'l
 
 | Yapılandırma | Cevaplanan | p50 | p99 | İsabet oranı |
 | --- | --- | --- | --- | --- |
-| sticky cookie'li round robin | 1.110 istek/s | 21,2 ms | 240,9 ms | %94,7 |
-| consistent hashing, sınırsız (§10.9) | 1.099 istek/s | 21,4 ms | 241,4 ms | %94,7 |
+| least connections üzerinde sticky session | 1.611 istek/s | 19,8 ms | 180,5 ms | %93,5 |
+| consistent hashing, sınırsız | 1.278 istek/s | 22,4 ms | 249,5 ms | %90,2 |
+| karşılaştırma için round robin | 738 istek/s | 57,6 ms | 266,3 ms | %15,0 |
 
-| On birinci bir backend yenilemeyle katılır | İsabet oranı önce; sonraki 3 s'de; ardından gelen 22 s'de | Yeni backend'in aldığı istekler |
+| Bir backend yenilemeyle katılır | İsabet oranı önce; sonraki 3 s'de; ardından gelen 22 s'de | Yeni backend'in aldığı istekler |
 | --- | --- | --- |
-| consistent hashing, sınırsız | %94,3, %88,0, %92,0 | %9,1 |
-| sticky cookie'li round robin | %94,5, %96,9, %97,5 | %0,4 |
+| consistent hashing, sınırsız | %90,2, %84,8, %90,5 | %9,9 |
+| least connections üzerinde sticky session | %94,0, %96,2, %98,1 | %0,8 |
 
-Üç hipotez de tutar. Bir cookie ile round robin her oturumu başladığı yerde tuttu ve istemci hiçbir
-anahtar göndermeden her ölçütte consistent hashing'i yakaladı. Fark havuz değiştiğinde görünür.
-Consistent hashing yeni backend'e isteklerin %9,1'ini verdi — on birde bir %9,09'dur — ve bunun
-bedelini, o oturumlar orada ıskalarken altı puanlık bir düşüşle ödedi. Sticky session hiçbir bedel
-ödemedi ve hiçbir şeyi taşımadı; yeni backend isteklerin %0,4'üyle neredeyse boşta kaldı: ancak yeni
-istemciler geldikçe ya da eski pin'ler bozuldukça pay alır. İkisi de yanlış değildir: biri havuzu
-hemen dengeler, diğeri her oturumu sıcak tutar.
+| Bir backend öldürülür | İsabet oranı önce; sonraki 3 s'de; ardından gelen 22 s'de | Başarısız istekler |
+| --- | --- | --- |
+| consistent hashing, sınırsız | %91,2, %85,6, %90,9 | hiç |
+| least connections üzerinde sticky session | %94,6, %86,7, %92,7 | hiç |
 
-Sticky bir koşunun ortasında backend-4 öldürüldüğünde 1.559 istek backend'ini yok buldu ve yeniden
-pinlendi; hiçbir istek başarısız olmadı. Hayatta kalanların isabet oranı önce %93,3'ten sonraki üç
-saniyede %85,9'a, ardından gelen yirmi saniyede %90,5'e gitti: kendi oturumları pin'lerini korudu;
-düşüş, taşınan oturumların düştükleri yerde bir kez ıskalamasıdır.
+Üç hipotez de tutar. Bir cookie ile her oturum, istemci hiçbir anahtar göndermeden başladığı yerde
+kaldı: round robin üzerindeki tek koşularda sticky session her ölçütte consistent hashing'i yakaladı —
+saniyede 1.110'a karşı 1.099 istek, ikisinde de %94,7 hatırlanma — ve kampanyada, least connections
+üzerinde, onu geçti: %93,5 hatırlanma ve %26 daha fazla cevaplanan istek. Fark ilk yerleştirmedir:
+least connections yavaş backend'i trafiğin %4,5'inde tuttu, eşit ağırlıklı consistent hashing ise ona
+%10 gönderdi.
+
+Önemli olan fark havuz değiştiğinde görünür. Consistent hashing yeni backend'e isteklerin %9,9'unu
+verdi — onda bir düşüyordu — ve bunun bedelini, o oturumlar orada ıskalarken beş puanlık bir düşüşle
+ödedi. Sticky session hiçbir bedel ödemedi ve hiçbir şeyi taşımadı; yeni backend isteklerin %0,8'iyle
+neredeyse boşta kaldı: ancak yeni istemciler geldikçe ya da eski pin'ler bozuldukça pay alır. İkisi
+de yanlış değildir: biri havuzu hemen dengeler, diğeri her oturumu sıcak tutar. Bir backend
+öldüğünde ikisi de yalnızca onun oturumlarını taşıdı, hiçbir istek başarısız olmadı ve taşınan
+oturumların bir kez ıskaladığı üç saniye boyunca isabet oranı beş ile sekiz puan arasında düştü.
 
 ---
 
@@ -1306,7 +1321,7 @@ bu yüzden yalnızca bayt ve bellek ayırma sayıları kapı olarak kullanılır
 - **Tek düğüm.** Hız sınırları, devre durumu ve retry budget süreç başınadır; birkaç yük dengeleyici
   örneğinin her biri kendi sınırını uygular.
 - **Sticky session yeniden dengelemez.** Havuza eklenen bir backend, pin'ler bozulana kadar yalnızca
-  görmediği istemcileri alır; §10.10'da isteklerin %0,4'ü. Consistent hashing payını hemen taşır,
+  görmediği istemcileri alır; §10.10'da isteklerin %0,8'i. Consistent hashing payını hemen taşır,
   bedeli isabet oranıdır. `sticky.max_age` ile süresi dolan bir pin, havuzun zamanla dengelenmesine
   izin vermenin bir yoludur.
 - **Log toplama ve uyarılar** (Loki, Alertmanager) v1.0 sonrasına ertelenmişti ve hâlâ yok.
