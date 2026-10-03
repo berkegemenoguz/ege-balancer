@@ -1,6 +1,6 @@
 # Performance report
 
-Two measurement campaigns, which answer different questions.
+Three measurement campaigns, which answer different questions.
 
 The first, on day 10 of the plan, drove load through the balancer against ten trivial backends to
 find out where the balancer itself was slow. It found three bottlenecks and is recorded below as it
@@ -12,6 +12,11 @@ that is not uniform. It is in [Measurements against the profiled
 backends](#measurements-against-the-profiled-backends), and it is the one to read for a question
 about choosing an algorithm. Its load generator, `cmd/loadgen`, is part of the repository, so the
 numbers can be produced again rather than taken on trust.
+
+The third, after v1.5.0, measures what keeping a client on one backend is worth — consistent
+hashing and sticky sessions against the algorithms that do not — on the same backends with and
+without a memory of their clients, and when the pool changes under them. It is in [Measurements of
+affinity](#measurements-of-affinity).
 
 ## Method
 
@@ -423,6 +428,156 @@ The runs support three recommendations, in the order they matter.
   today, and that is the clearest gap these measurements found.
 - **Read throughput and refusals together.** In this pool, the configuration with the highest
   requests per second was also the one refusing 7% of them.
+
+## Measurements of affinity
+
+The third campaign, after v1.5.0, settles what consistent hashing and sticky sessions are worth.
+§10.9 and §10.10 of the technical design first measured them in single runs, with scripts that were
+not kept; this campaign repeats every cell three times with scripts that are in the repository, on
+the same Compose environment as the second campaign, and with a generator that records its own
+revision in every result.
+
+### Method
+
+| | |
+| --- | --- |
+| Machine, balancer | as in the second campaign: one machine, the balancer in Compose, `configs/lb.measure.yaml` with rate limiting off |
+| Pools | the ten profiled backends as they are (stateless), and the same backends remembering 5,000 sessions each, with a miss costing 40 ms (`deploy/docker-compose.memory.yml`) |
+| Traffic | closed loop; every request names one of 30,000 sessions in `X-Session`, drawn uniformly, and every session keeps the cookies it is given |
+| Configurations | round robin; least connections; weighted round robin; consistent hashing unbounded and at a balance factor of 150, both with equal weights; consistent hashing at 125 with weights by capacity; sticky sessions over least connections |
+| Windows | stateless: 4 s of warm-up, 20 s measured, at 50 and 300 connections; memory: caches cleared, 60 s of warm-up, 20 s measured, at 50 connections |
+| Repeats | three per cell, the configurations interleaved and their order rotated, 8 s between runs; every figure is the median with its range |
+| Generator | one revision for every run, `3b52d620a8f8`, built from a committed tree |
+
+Every request carries a session and every session keeps its cookies, whatever the configuration,
+so that every configuration sees exactly the same traffic: the ones that ignore the header and the
+cookie simply ignore them.
+
+```bash
+POOL=stateless REPEATS=3 CONNECTIONS="50 300" scripts/measure-affinity.sh
+POOL=memory REPEATS=3 CONNECTIONS=50 scripts/measure-affinity.sh
+scripts/measure-pool-change.py --repeats 3
+scripts/summarise.py --affinity stateless
+scripts/summarise.py --affinity memory
+scripts/summarise.py --pool-change
+```
+
+### Without a memory, affinity costs only when it ignores capacity
+
+| Connections | Configuration | Runs | Answered | p50 | p99 | Refused | Hit rate | Moved by the bound | Kept by the cookie |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 50 | round robin | 3 | 1,393/s (1,383–1,405) | 20.2 ms (20.0–20.2) | 256.8 ms (255.4–258.9) | 0.0% | — | — | — |
+| 50 | least connections | 3 | 1,888/s (1,886–1,888) | 17.9 ms (17.8–18.0) | 155.7 ms (147.6–161.1) | 0.0% | — | — | — |
+| 50 | weighted round robin | 3 | 1,915/s (1,905–1,945) | 17.7 ms | 149.2 ms (146.3–158.4) | 0.0% | — | — | — |
+| 50 | consistent hash | 3 | 1,368/s (1,368–1,415) | 20.0 ms (19.9–20.2) | 261.3 ms (248.1–264.6) | 0.0% | — | 0.0% | — |
+| 50 | consistent hash 150 | 3 | 1,802/s (1,799–1,809) | 18.3 ms (18.2–18.5) | 169.4 ms (166.6–170.3) | 0.0% | — | 13.4% (13.2–13.8) | — |
+| 50 | consistent hash 125 by capacity | 3 | 2,189/s (2,184–2,200) | 16.8 ms (16.8–16.9) | 105.6 ms (105.0–109.5) | 0.0% | — | 21.0% (20.9–21.2) | — |
+| 50 | sticky least connections | 3 | 1,877/s (1,877–1,880) | 17.9 ms (17.8–17.9) | 160.9 ms (155.6–161.4) | 0.0% | — | — | 55.9% (55.8–55.9) |
+| 300 | round robin | 3 | 6,338/s (5,984–6,461) | 30.9 ms (29.8–32.9) | 323.7 ms (323.6–331.8) | 7.9% (7.8–7.9) | — | — | — |
+| 300 | least connections | 3 | 6,013/s (5,995–6,049) | 40.4 ms (40.1–40.6) | 172.4 ms (172.2–174.5) | 0.0% | — | — | — |
+| 300 | weighted round robin | 3 | 5,844/s (5,591–6,028) | 37.2 ms (35.9–38.8) | 333.9 ms (327.2–335.9) | 0.6% (0.5–0.6) | — | — | — |
+| 300 | consistent hash | 3 | 6,099/s (5,958–6,401) | 31.7 ms (29.1–32.9) | 326.2 ms (324.1–332.5) | 7.9% (7.9–8.0) | — | 0.0% | — |
+| 300 | consistent hash 150 | 3 | 6,094/s (5,845–6,313) | 38.2 ms (36.7–40.2) | 215.8 ms (215.2–216.1) | 0.0% | — | 10.9% (10.7–11.3) | — |
+| 300 | consistent hash 125 by capacity | 3 | 5,483/s (5,250–5,747) | 45.9 ms (44.1–47.5) | 151.2 ms (149.3–161.0) | 0.0% | — | 11.1% (10.9–11.6) | — |
+| 300 | sticky least connections | 3 | 5,703/s (5,564–6,002) | 42.0 ms (39.2–43.0) | 206.3 ms (196.7–211.3) | 0.0% | — | — | 88.3% (87.8–88.6) |
+
+All 42 runs by the generator at 3b52d620a8f8.
+
+Backends that remember nothing gain nothing from seeing the same client again, so here affinity can
+only cost. It costs exactly where it ignores capacity. Unbounded consistent hashing with equal
+weights spreads sessions evenly, as round robin spreads requests: it sends the slow backend, worth 3%
+of the pool, 10% of the traffic, and matches round robin to within its range — 1,368 against 1,393
+requests a second at 50 connections, and 7.9% refused at 300 for both. The bound takes traffic off
+the slow backends and brings consistent hashing level with least connections: at a factor of 150,
+1,802 a second at 50 connections and nothing refused at 300. With weights by capacity and a factor
+of 125 it answered the most of any configuration at 50 connections, 2,189 a second with a p99 of
+106 ms, and at 300 the shortest tail, 151 ms, for 9% less throughput than least connections.
+Sticky sessions over least connections cost nothing at 50 connections and 5% of throughput at 300,
+where a pinned client cannot follow the load as least connections would.
+
+### With a memory, affinity more than doubles what the pool answers
+
+| Connections | Configuration | Runs | Answered | p50 | p99 | Refused | Hit rate | Moved by the bound | Kept by the cookie |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 50 | round robin | 3 | 738/s (730–739) | 57.6 ms (57.5–57.6) | 266.3 ms (263.9–270.6) | 0.0% | 15.0% (14.9–15.4) | — | — |
+| 50 | least connections | 3 | 796/s (794–801) | 56.1 ms (55.9–56.4) | 216.7 ms (215.8–221.9) | 0.0% | 15.7% (14.9–16.1) | — | — |
+| 50 | weighted round robin | 3 | 839/s (836–842) | 55.4 ms (55.3–55.4) | 188.4 ms (184.0–192.0) | 0.0% | 15.8% (15.8–16.1) | — | — |
+| 50 | consistent hash | 3 | 1,278/s (1,233–1,280) | 22.4 ms (22.4–22.6) | 249.5 ms (248.3–271.9) | 0.0% | 90.2% (89.4–90.2) | 0.0% | — |
+| 50 | consistent hash 150 | 3 | 1,442/s (1,436–1,451) | 22.0 ms (21.9–22.1) | 186.6 ms (184.7–189.8) | 0.0% | 83.7% (83.6–83.8) | 12.8% (12.6–12.9) | — |
+| 50 | consistent hash 125 by capacity | 3 | 1,557/s (1,555–1,570) | 21.7 ms (21.7–22.0) | 127.8 ms (126.6–128.2) | 0.0% | 77.5% (77.5–77.8) | 20.8% (20.8–21.2) | — |
+| 50 | sticky least connections | 3 | 1,611/s (1,609–1,634) | 19.8 ms (19.7–20.1) | 180.5 ms (178.4–181.1) | 0.0% | 93.5% | — | 93.5% |
+
+All 21 runs by the generator at 3b52d620a8f8.
+
+With 30,000 sessions and room for 5,000 on each backend, an algorithm that sends every session
+everywhere finds it remembered about one time in six — 15% to 16% for round robin, least connections
+and weighted round robin alike — and pays the 40 ms miss on the rest, which sets the median near
+57 ms whatever the algorithm. Keeping a session on one backend takes the penalty off: unbounded
+consistent hashing raised the hit rate to 90% and the median fell to 22 ms. Sticky sessions over
+least connections did best on throughput and hit rate, 1,611 requests a second — 2.2 times round
+robin — with 93.5% of requests kept on their backend and the same share remembered: every miss left
+is a session's first request.
+
+Unbounded consistent hashing answered less than sticky sessions with nearly the same hit rate, for
+the reason the stateless pool shows: with equal weights it sent the slow backend 10% of the traffic,
+where sticky sessions, placing each session's first request by least connections, sent it 4.5%. The
+bound recovers throughput and the tail at a cost in hit rate — 150 moved 13% of requests and kept
+84% remembered; 125 with weights by capacity moved 21%, kept 78%, and had the shortest tail, 128 ms.
+It also sent the slow backend only 0.8% of the traffic, below the 3% its capacity is worth: a slow
+backend holds more requests in flight for the same share, and the bound reads that as load.
+
+### When the pool changes
+
+On the memory pool at 50 connections, with the caches warm after a minute, a backend joined the pool
+by a reload (backend-6, left out until then) or was killed (backend-4), eighty seconds into a run.
+The hit rate is read from the backends' own counters over fifteen seconds before the event, the
+three seconds after it and the twenty-two after that.
+
+| Event | Configuration | Runs | Hit rate before | First 3 s after | Next 22 s | New backend's share | Failed requests |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| join | consistent hash | 3 | 90.2% (90.1–90.2) | 84.8% (84.6–84.9) | 90.5% (90.4–90.7) | 9.9% (9.9–10.0) | 0 |
+| join | sticky least connections | 3 | 94.0% (93.9–94.1) | 96.2% (96.1–96.5) | 98.1% (98.0–98.1) | 0.8% (0.7–0.8) | 0 |
+| kill | consistent hash | 3 | 91.2% (91.1–91.5) | 85.6% (85.1–85.7) | 90.9% (90.6–91.0) | — | 0 |
+| kill | sticky least connections | 3 | 94.6% (94.4–94.6) | 86.7% (86.6–86.9) | 92.7% (92.5–92.8) | — | 0 |
+
+All 12 runs by the generator at 3b52d620a8f8.
+
+When a backend joins, the two part ways. Consistent hashing gave the new backend its share at once —
+9.9%, where a tenth was due — and those sessions missed there, so the hit rate fell five points for a
+few seconds and was back within the twenty-two that followed. Sticky sessions moved no one: the new
+backend took 0.8% of the requests, all of them sessions that had not been seen before, and the hit
+rate went on rising as the caches filled. Consistent hashing balances the pool at once; sticky
+sessions keep every session warm and leave the new backend nearly idle until new clients come or old
+pins break.
+
+When a backend dies, both move only its sessions, about a tenth of them, and no request failed: the
+first attempt on the dead backend failed, and the retry answered it elsewhere. The hit rate fell
+between five and eight points for three seconds while the moved sessions missed once; in the
+twenty-two seconds after, consistent hashing was back where it had been, and sticky sessions within
+two points of it.
+
+### What this says about the configuration
+
+- **Against backends that remember, keep clients on one backend.** Both ways more than double what
+  this pool answers. Sticky sessions over least connections did best on throughput and hit rate, and
+  need nothing from the client but to keep a cookie. Consistent hashing needs the client to send a
+  key, and in return places a session the same way on every balancer and after every restart.
+- **Give the backends weights by capacity under consistent hashing.** With equal weights it spreads
+  sessions evenly, which on an unequal pool repeats round robin's mistake. With weights by capacity
+  and a bound of 125 it had the shortest tail on both pools.
+- **The bound trades affinity for balance.** Each step down from no bound moved more requests off
+  their backend and lost hit rate, and bought throughput and a shorter tail. The bound reads load as
+  requests in flight, which a slow backend holds more of, so it pushes even more traffic off slow
+  backends than their capacity asks.
+- **Choose by what should happen when the pool changes.** Consistent hashing gives a new backend its
+  share at once, at a brief cost in hit rate; sticky sessions keep every session where it is, and the
+  new backend waits for new clients.
+- **Where the backends remember nothing, affinity is a constraint and nothing more.** Bounded, or
+  weighted by capacity, it costs little; unbounded with equal weights, it costs what round robin
+  does.
+
+The skewed-session runs of §10.9 of the technical design, which show the bound holding the busiest
+backend near its share, were not repeated in this campaign and remain single runs.
 
 ## Keeping the fixes
 
