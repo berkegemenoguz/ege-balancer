@@ -425,32 +425,31 @@ Round robin is not misbehaving — an equal share is what it promises — but an
 unequal pool saturates the weakest backend first. Least connections reaches the same distribution as
 capacity-proportional weights without being told anything about capacity.
 
-**What consistent hashing is worth.** The same backends, each remembering 5,000 sessions and paying
-40 ms for one it does not, with 30,000 sessions sent from 40 connections, one run each:
+**What keeping a client on one backend is worth.** The same backends, each remembering 5,000
+sessions and paying 40 ms for one it does not, with 30,000 sessions sent from 50 connections; the
+median of three runs each:
 
-| Algorithm | Answered | p50 | p99 | Cache hit rate |
+| Configuration | Answered | p50 | p99 | Cache hit rate |
 | --- | --- | --- | --- | --- |
-| round robin | 580 req/s | 58.1 ms | 264.5 ms | 13.4% |
-| consistent hashing, unbounded | 1,099 req/s | 21.4 ms | 241.4 ms | 94.7% |
-| consistent hashing, balance factor 150 | 1,178 req/s | 21.6 ms | 181.0 ms | 83.4% |
+| round robin | 738 req/s | 57.6 ms | 266.3 ms | 15.0% |
+| least connections | 796 req/s | 56.1 ms | 216.7 ms | 15.7% |
+| consistent hashing, unbounded | 1,278 req/s | 22.4 ms | 249.5 ms | 90.2% |
+| consistent hashing, 125, weights by capacity | 1,557 req/s | 21.7 ms | 127.8 ms | 77.5% |
+| sticky sessions over least connections | 1,611 req/s | 19.8 ms | 180.5 ms | 93.5% |
 
-With a few sessions sending most of the requests, a balance factor of 125 held the busiest backend
-to 1.22 times the average in flight, against 3.8 times unbounded, and answered 24% more requests.
-The bound counts requests in flight, which a slow backend holds more of, so it works best with
-weights proportional to capacity: that combination answered the most requests in every run. The
-details are in §10.9 of the technical design.
+Sticky sessions answered 2.2 times as many requests as round robin without the client sending any
+key. Under consistent hashing, weights by capacity matter: with equal weights it sends the slow
+backend a tenth of the traffic, as round robin does. The two part when the pool changes: a backend
+added by a reload took 9.9% of the requests at once under consistent hashing, at a cost of five
+points of hit rate for a few seconds, and 0.8% under sticky sessions, which cost nothing and left it
+nearly idle.
 
-**What sticky sessions are worth.** Round robin with sticky cookies, every session keeping its own,
-matched consistent hashing on every figure — 1,110 requests a second, a p50 of 21.2 ms, a 94.7% hit
-rate — without the client sending any key. They part when the pool changes: an eleventh backend
-added by a reload took 9.1% of the requests at once under consistent hashing, which cost six points
-of hit rate for a few seconds, and 0.4% under sticky sessions, which cost nothing and left it nearly
-idle. §10.10 of the technical design has the details.
-
-The [performance report](docs/performance-report.md) has both campaigns in full: the method, all
+The [performance report](docs/performance-report.md) has all three campaigns in full: the method, all
 fifty-four runs across six load levels, what happens when a backend is stopped or crashed mid-run,
-where least connections loses its signal, and why the client's p95 at 2,000 connections says more
-about the machine than about the balancer. `cmd/loadgen` and `scripts/measure.sh` reproduce them.
+where least connections loses its signal, why the client's p95 at 2,000 connections says more about
+the machine than about the balancer, and the affinity campaign on backends with and without a
+memory, including a backend joining and dying under load. `cmd/loadgen` and the scripts in
+`scripts/` reproduce them.
 
 ## Project layout
 
