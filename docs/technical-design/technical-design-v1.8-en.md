@@ -7,7 +7,7 @@
 | Author | Berk Egemen Oğuz |
 | Date | 11 September 2026 |
 | Version | 1.8 — supersedes v1.6 and the v1.7 revision notes |
-| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), the second measurement campaign against the profiled backends (§10.8), the three defects the realistic mock backends exposed, fixed in v1.3.1, and clients that give up being counted against the backends, fixed in v1.3.2 (§11.1), consistent hashing with bounded loads (§5.5, §10.9), and sticky sessions by a signed cookie (§5.6, §10.10) |
+| Status | Describes v1.0.0 as released and the work since: benchmarks with regression guards, the retry budget, the power of two choices (§5.4), liveness and readiness probes (§8.2), the retry rule for requests that are not idempotent (§6.3), request identifiers (§8.2), the second measurement campaign against the profiled backends (§10.8), the three defects the realistic mock backends exposed, fixed in v1.3.1, and clients that give up being counted against the backends, fixed in v1.3.2 (§11.1), consistent hashing with bounded loads (§5.5, §10.9), sticky sessions by a signed cookie (§5.6, §10.10), and retries that took round robin turns, fixed in v1.5.1 (§11.1) |
 | Code | `github.com/berkegemenoguz/ege-balancer` |
 | Language | English. A Turkish edition with the same content is [technical-design-v1.8-tr.md](technical-design-v1.8-tr.md) |
 
@@ -257,7 +257,7 @@ Shared state is protected according to how it is used:
 
 | State | Protection | Why |
 | --- | --- | --- |
-| Round robin position | one atomic counter | a single increment per selection |
+| Round robin position | one atomic counter | a single increment per first attempt; a retry only reads it (§5.1) |
 | Requests in flight per backend | atomic counter on `Backend` | read by least connections, written by every request |
 | Backend weight | atomic on `Backend` | changed by reload while being read (§11.1) |
 | Weighted round robin credit | mutex | a read-modify-write across the whole pool |
@@ -289,13 +289,20 @@ All strategies implement `LBStrategy`. The proxy core first narrows the pool to 
 healthy, whose circuit is closed, and that this request has not tried yet; the strategy chooses
 among those. Keeping filtering out of the strategies keeps each strategy a pure function of the
 pool it is given. Consistent hashing also implements `KeyedStrategy`, which places a request by a
-key it carries (§5.5).
+key it carries (§5.5), and round robin `RetryStrategy`, which chooses a retry without taking a
+turn (§5.1).
 
 ### 5.1 Round robin
 
 A single atomic counter is incremented per selection and taken modulo the pool size. Selection is
 O(1) and lock-free. It is the right choice when backends are equal, and it is exact: over ten
 backends, a multiple of ten requests divides evenly.
+
+A retry takes no turn. The counter is shared by every request, so a turn taken by a retry would be
+the next request's: before v1.5.1, every failure of a backend cost the backend after it in the pool
+its turn, and the failing backend was offered more than its share (§11.1). A retry now reads the
+counter without incrementing it and goes to the backend it falls on among those the request has not
+tried; as the turns move on, retries spread over the pool.
 
 ### 5.2 Smooth weighted round robin
 
@@ -312,6 +319,11 @@ Because there is no random source, the tests are exact instead of statistical �
 weights 1, 2 and 3 divide into exactly 200, 400 and 600. Credit is keyed by address, so it remains
 meaningful while the pool offered to the strategy changes as backends leave and rejoin. The cost is
 a scan of the pool under a mutex: O(n) per selection (§10.4).
+
+A retry is chosen by the same selection, among the backends the request has not tried, and is
+charged like any other: the backend that serves it gives the credit back in later turns. A backend
+that fails therefore keeps its share of first attempts, and weighted round robin needs nothing like
+round robin's way of retrying (§5.1).
 
 ### 5.3 Least connections
 
@@ -1253,6 +1265,24 @@ requests sent to the hanging backend and kept all three in the pool. A client th
 neither counted against a backend nor retried. The load generator had met this behaviour in the
 campaign of §10.8 and was changed to stop its workers cleanly; the balancer was left as it was. A
 workaround in the tool had hidden a defect in the product.
+
+A fifth defect, fixed in v1.5.1, was noticed while the fourth was being fixed and left for later: a
+retry under round robin took a turn, as a first attempt does. The turns are shared by every
+request, so the turn a retry took was the next request's. Each time a backend failed, the backend
+after it in the pool lost its turn, and the failing backend was offered more than its share: with
+three backends and the middle one failing every attempt, it was offered half of the requests and
+the last one only retries, which a test reproduces with the fix reverted. It is also what made every
+request in the comparison above begin at the hanging backend. A backend that fails every attempt
+leaves the pool after three failures (§10.8), but one that fails some of its requests stays in. On
+the ten mock backends, with one answering 30% of its requests with a 500, `retry_on_5xx` on and the
+unhealthy threshold raised to ten so that it stayed in the pool, a single client sending requests
+one after another for 90 seconds gave the backend after it 7.5% of the attempts against 10.0% to
+10.5% for every other; with the fix, every backend received between 9.7% and 10.1%. Under
+concurrent load the effect fades: a failure returns after other requests have started, and the turn
+its retry takes falls on whichever backend is next by then. At ten connections the same comparison
+showed nothing beyond the noise. A retry now reads the turn without taking it. Weighted round robin
+never had the defect, because its credit charges a retry to the backend that serves it (§5.2); a
+test holds it to that.
 
 ### 11.2 Where the design was wrong, and why that was useful
 
