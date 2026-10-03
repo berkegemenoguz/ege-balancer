@@ -6,8 +6,10 @@ run several times. A single run cannot separate two figures a few per cent
 apart, so every number is reported as the median of its runs with the range
 beside it, and the report only draws conclusions from gaps wider than that.
 
-    scripts/summarise.py                  # the matrix and the resource table
-    scripts/summarise.py --histogram 2000 # the latency distribution at one level
+    scripts/summarise.py                    # the matrix and the resource table
+    scripts/summarise.py --histogram 2000   # the latency distribution at one level
+    scripts/summarise.py --affinity memory  # scripts/measure-affinity.sh, one pool
+    scripts/summarise.py --pool-change      # scripts/measure-pool-change.py
 
 Only the standard library is used, so it runs wherever python3 does.
 """
@@ -21,6 +23,14 @@ import statistics
 import sys
 
 ALGORITHMS = ["round_robin", "weighted_round_robin", "least_connections"]
+
+# The configurations scripts/measure-affinity.sh compares, in the order the
+# report lists them.
+CONFIGURATIONS = ["round_robin", "least_connections", "weighted_round_robin", "consistent_hash",
+                  "consistent_hash_150", "consistent_hash_125_by_capacity", "sticky_least_connections"]
+
+# Results of the affinity scripts, which the original matrix leaves alone.
+AFFINITY_PREFIXES = ("affinity-", "change-")
 
 
 def to_ms(value):
@@ -45,7 +55,7 @@ def drift():
     per_repeat = {}
     for path in sorted(glob.glob("measurements/*.json")):
         name = os.path.basename(path)
-        if name.startswith("failure-"):
+        if name.startswith("failure-") or name.startswith(AFFINITY_PREFIXES):
             continue
         parts = name[: -len(".json")].rsplit("-", 2)
         if len(parts) != 3:
@@ -78,7 +88,7 @@ def load(pattern="measurements/*.json", failures=False):
     cells = {}
     for path in sorted(glob.glob(pattern)):
         name = os.path.basename(path)
-        if name.startswith("failure-") != failures:
+        if name.startswith("failure-") != failures or name.startswith(AFFINITY_PREFIXES):
             continue
         run = json.load(open(path))
         key = run.get("algorithm", "") if failures else (run["connections"], run.get("algorithm", ""))
@@ -243,12 +253,109 @@ def histogram(level):
             )
 
 
+def provenance(runs):
+    """Says which generator made the runs of a table, and warns when it was not
+    one committed generator: a campaign measured with a generator that changed
+    part way through compares two instruments, not two configurations."""
+    revisions = {run.get("generator", {}).get("revision", "unknown") for run in runs}
+    modified = sum(1 for run in runs if run.get("generator", {}).get("modified"))
+    names = ", ".join(sorted(revision[:12] for revision in revisions))
+    if len(revisions) == 1 and "unknown" not in revisions and not modified:
+        print(f"\nAll {len(runs)} runs by the generator at {names}.")
+        return
+    print(f"\nWarning: {len(runs)} runs by generators {names}; {modified} built from a tree with changes"
+          " not committed. Rerun them with one committed generator before quoting them.")
+
+
+def counter_share(run, prefix, part, whole):
+    """One of the balancer's counters as a share of others, from a run's
+    counters, or None when none of them moved."""
+    counters = run.get("balancer_counters", {})
+    total = sum(counters.get(prefix + name, 0) for name in whole)
+    return 100 * counters.get(prefix + part, 0) / total if total else None
+
+
+def maybe(values, digits=1, unit="%"):
+    present = [v for v in values if v is not None]
+    return spread(present, digits, unit) if present else "—"
+
+
+def affinity(pool):
+    """The runs of scripts/measure-affinity.sh on one pool."""
+    cells, every = {}, []
+    for path in sorted(glob.glob(f"measurements/affinity-{pool}-*.json")):
+        run = json.load(open(path))
+        every.append(run)
+        cells.setdefault((run["connections"], run.get("algorithm", "")), []).append(run)
+    if not cells:
+        sys.exit(f"no affinity runs on the {pool} pool in measurements/")
+
+    print("| Connections | Configuration | Runs | Answered | p50 | p99 | Refused | Hit rate "
+          "| Moved by the bound | Kept by the cookie |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    placements = ["home", "overloaded", "unavailable"]
+    sticky = ["pinned", "new", "repinned", "unknown"]
+    for connections in sorted({c for c, _ in cells}):
+        for configuration in CONFIGURATIONS:
+            runs = cells.get((connections, configuration))
+            if not runs:
+                continue
+            hits = [100 * r["cache"]["hit_rate"] if r.get("cache") else None for r in runs]
+            print(
+                f"| {connections:,} | {configuration.replace('_', ' ')} | {len(runs)} "
+                f"| {spread([answered(r) for r in runs], 0, '/s')} "
+                f"| {spread([to_ms(r['p50']) for r in runs], 1, ' ms')} "
+                f"| {spread([to_ms(r['p99']) for r in runs], 1, ' ms')} "
+                f"| {spread([refused(r) for r in runs], 1, '%')} "
+                f"| {maybe(hits)} "
+                f"| {maybe([counter_share(r, 'placed ', 'overloaded', placements) for r in runs])} "
+                f"| {maybe([counter_share(r, 'sticky ', 'pinned', sticky) for r in runs])} |"
+            )
+    provenance(every)
+
+
+def pool_change():
+    """The runs of scripts/measure-pool-change.py."""
+    cells = {}
+    for path in sorted(glob.glob("measurements/change-*.json")):
+        if path.endswith(".generator.json"):
+            continue
+        record = json.load(open(path))
+        cells.setdefault((record["event"], record["configuration"]), []).append(record)
+    if not cells:
+        sys.exit("no pool change runs in measurements/")
+
+    print("| Event | Configuration | Runs | Hit rate before | First 3 s after | Next 22 s "
+          "| New backend's share | Failed requests |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    for (event, configuration), records in sorted(cells.items()):
+        def rates(key):
+            return [100 * r[key]["hit_rate"] if r[key]["hit_rate"] is not None else None for r in records]
+        shares = [100 * r["joiner_share"] if "joiner_share" in r else None for r in records]
+        print(
+            f"| {event} | {configuration.replace('_', ' ')} | {len(records)} "
+            f"| {maybe(rates('before'))} | {maybe(rates('first_3s'))} | {maybe(rates('next_22s'))} "
+            f"| {maybe(shares)} | {spread([r['generator']['failures'] for r in records], 0)} |"
+        )
+    provenance([r["generator"] for records in cells.values() for r in records])
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--histogram", type=int, metavar="CONNECTIONS")
     parser.add_argument("--resources", type=int, metavar="CONNECTIONS")
     parser.add_argument("--failures", action="store_true")
+    parser.add_argument("--affinity", choices=["memory", "stateless"])
+    parser.add_argument("--pool-change", action="store_true")
     arguments = parser.parse_args()
+
+    if arguments.affinity:
+        affinity(arguments.affinity)
+        return
+
+    if arguments.pool_change:
+        pool_change()
+        return
 
     if arguments.histogram:
         histogram(arguments.histogram)
