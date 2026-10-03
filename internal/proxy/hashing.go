@@ -23,13 +23,17 @@ func keyFor(hash config.ConsistentHash) func(*http.Request) string {
 }
 
 // choose picks the backend for one attempt from the candidates by the
-// algorithm. Under consistent hashing, a request with a key goes where its key
-// belongs, and a retry, with the backends already tried left out, to the next
-// in the key's order. The first attempt also records where the request was
-// placed.
+// algorithm. Under round robin, a retry takes no turn, so the request after it
+// goes where it would have gone without the failure. Under consistent hashing,
+// a request with a key goes where its key belongs, and a retry, with the
+// backends already tried left out, to the next in the key's order. The first
+// attempt also records where the request was placed.
 func (c *Core) choose(active *settings, key string, candidates []*balancer.Backend, first bool) (*balancer.Backend, error) {
 	keyed, isKeyed := active.strategy.(balancer.KeyedStrategy)
 	if !isKeyed {
+		if turns, takesTurns := active.strategy.(balancer.RetryStrategy); takesTurns && !first {
+			return turns.SelectRetry(candidates)
+		}
 		return active.strategy.Select(candidates)
 	}
 	if key == "" {
