@@ -1091,3 +1091,61 @@ added something off by default and left earlier results comparable; the review f
 | The seven configurations | each written by `scripts/configure.py` loads and validates; with `--without backend-6`, nine backends |
 | The summariser | the original matrix unchanged; the new tables built from earlier results, which it reports as made by an unknown generator |
 | The whole suite with the race detector | green; lint clean |
+
+## The affinity campaign
+
+**Why.** Consistent hashing and sticky sessions had each been measured in single runs, on the host,
+with scripts that were not kept. The last phase of the plan was to measure them properly: every
+cell three times, with the scripts in the repository, on the Compose environment of the second
+campaign, by one committed generator.
+
+### What was measured
+
+- **Seven configurations**: round robin, least connections and weighted round robin; consistent
+  hashing unbounded and at a balance factor of 150, both with equal weights, and at 125 with weights
+  by capacity; sticky sessions over least connections.
+- **Two pools**: the profiled backends as they are, at 50 and 300 connections, and the same backends
+  remembering 5,000 sessions each, at 50 connections, after a minute of warm-up.
+- **Two changes to the pool** under consistent hashing and sticky sessions: a backend added by a
+  reload, and a backend killed, eighty seconds into a run.
+- 75 runs in all, every one by the generator at `3b52d620a8f8`, built from a committed tree.
+
+### What it found
+
+- **With a memory, keeping a client on one backend more than doubles what the pool answers.**
+  Sticky sessions over least connections answered 1,611 requests a second against round robin's
+  738, with 93.5% of requests remembered against 15%. Unbounded consistent hashing answered 1,278,
+  with 90.2% remembered.
+- **Without one, affinity costs only where it ignores capacity.** Unbounded consistent hashing with
+  equal weights behaved exactly like round robin, refusing 7.9% of requests at 300 connections;
+  bounded, or weighted by capacity, it did as well as least connections, and at 50 connections with
+  weights by capacity and a bound of 125 it answered the most of any configuration.
+- **The two differ when the pool changes.** A backend that joined took 9.9% of the requests at once
+  under consistent hashing, at a cost of five points of hit rate for a few seconds, and 0.8% under
+  sticky sessions. When a backend died, both moved only its sessions, and no request failed.
+
+### What went wrong
+
+- **The campaign outlived the command that ran it.** A background command is stopped after about
+  half an hour, and the campaign needed an hour and a half: it was stopped eight minutes into the
+  memory pool. The stateless pool was complete and was kept; the memory pool was run again from the
+  start, as a process of its own, since half a repeat would have broken the rotation of the order.
+- **Nothing in the repository could change while it ran.** Each script builds the generator when
+  it starts, and a change anywhere in the tree would have marked the later results as built from
+  uncommitted changes. The noise the reload signal prints into the logs was left alone for that
+  reason.
+- **The bound pushed the slow backend below its share.** With weights by capacity and a bound of
+  125, the slow backend took 0.8% of the traffic, below the 3% its capacity is worth: a slow backend
+  holds more requests in flight for the same share, and the bound reads that as load.
+- **The skewed-session runs were not repeated.** They need the requests in flight sampled during the
+  run, which the campaign's scripts do not do; §10.9 marks them as single runs.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| Every run by one committed generator | all 75, at `3b52d620a8f8`; `scripts/summarise.py` says so under each table |
+| The pools were the ones asked for | the script checks a mock's cache size before it measures |
+| Repeats | three per cell, the configurations interleaved and their order rotated; the ranges in the tables are a few per cent |
+| The pool changes | every run with a new backend gave it its share under consistent hashing, 9.9% to 10.0%; no request failed in any of the twelve |
+| The results in the documents | the performance report, §10.9 and §10.10 of the technical design, and the README quote the campaign's medians, and mark what was not repeated |
